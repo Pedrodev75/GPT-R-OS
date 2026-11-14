@@ -1,0 +1,56 @@
+#include "timer.h"
+
+enum { PIT_HZ = 1193182, TICKS_PER_SECOND = 100,
+       DIVISOR = (PIT_HZ + TICKS_PER_SECOND / 2) / TICKS_PER_SECOND,
+       COUNTER_COLUMN = 54 };
+
+static unsigned int ticks;
+static unsigned long long seconds;
+
+static void out(unsigned short port, unsigned char value)
+{
+    __asm__ volatile ("outb %0, %w1" : : "a"(value), "Nd"(port));
+}
+
+static void show_uptime(void)
+{
+    const char label[] = "Tempo ligado: ";
+    char digits[10];
+    unsigned long long value = seconds;
+    unsigned int length = 0;
+    volatile unsigned short *cell =
+        (volatile unsigned short *)0xb8000 + COUNTER_COLUMN;
+
+    for (unsigned int i = 0; label[i]; ++i)
+        *cell++ = 0x0f00 | label[i];
+    do {
+        digits[length++] = '0' + value % 10;
+        value /= 10;
+    } while (value && length < sizeof(digits));
+    while (length)
+        *cell++ = 0x0f00 | digits[--length];
+    *cell++ = 0x0f00 | ' ';
+    *cell = 0x0f00 | 's';
+}
+
+void timer_init(void)
+{
+    ticks = 0;
+    seconds = 0;
+    show_uptime();
+
+    /* Channel 0, low byte then high byte, mode 2 (rate generator). */
+    out(0x43, 0x34);
+    out(0x40, DIVISOR & 0xff);
+    out(0x40, DIVISOR >> 8);
+}
+
+void timer_irq_handler(void)
+{
+    if (++ticks == TICKS_PER_SECOND) {
+        ticks = 0;
+        ++seconds;
+        show_uptime();
+    }
+    out(0x20, 0x20);
+}

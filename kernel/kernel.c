@@ -1,4 +1,5 @@
 #include "idt.h"
+#include "timer.h"
 #include "keyboard.h"
 
 enum { WIDTH = 80, HEIGHT = 25, TEXT_COLOR = 0x0f00 };
@@ -86,7 +87,6 @@ void kernel_main(void)
 #ifdef GPT_R_TEST_INVALID_OPCODE
     __asm__ volatile ("ud2");
 #endif
-    keyboard_irq_init();
     load_accents();
     vga_register(0x3d4, 0x0a, 14);
     vga_register(0x3d4, 0x0b, 15);
@@ -95,6 +95,10 @@ void kernel_main(void)
     for (unsigned int i = 0; title[i]; ++i)
         vga[i] = TEXT_COLOR | title[i];
     vga[row * WIDTH] = TEXT_COLOR | '>';
+
+    timer_init();
+    keyboard_irq_init();
+    __asm__ volatile ("sti" : : : "memory");
 
     for (;;) {
         move_cursor(row, col);

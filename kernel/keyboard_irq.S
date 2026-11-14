@@ -1,8 +1,9 @@
 .intel_syntax noprefix
 .section .text
 .code64
-.global keyboard_irq_entry
-keyboard_irq_entry:
+.macro irq_entry entry, handler
+.global \entry
+\entry:
     # Preserve the interrupted code's caller-saved registers.
     push rax
     push rcx
@@ -17,7 +18,7 @@ keyboard_irq_entry:
     mov rbx, rsp
     and rsp, -16
     cld
-    call keyboard_irq_handler
+    call \handler
     mov rsp, rbx
     pop rbx
     pop r11
@@ -30,5 +31,9 @@ keyboard_irq_entry:
     pop rcx
     pop rax
     iretq
+.endm
+
+irq_entry keyboard_irq_entry, keyboard_irq_handler
+irq_entry timer_irq_entry, timer_irq_handler
 
 .section .note.GNU-stack,"",@progbits

@@ -58,7 +58,7 @@ void keyboard_irq_init(void)
     head = 0;
     tail = 0;
 
-    /* Remap the two 8259 PICs, then unmask only IRQ1. */
+    /* Remap the two 8259 PICs, then unmask IRQ0 and IRQ1. */
     write_port(0x21, 0xff);
     write_port(0xa1, 0xff);
     write_port(0x20, 0x11);
@@ -72,13 +72,12 @@ void keyboard_irq_init(void)
     write_port(0xa1, 0xff);
 
     /* The BIOS configured the PS/2 keyboard port and scan-code translation. */
-    write_port(0x21, 0xfd);
+    write_port(0x21, 0xfc);
     unsigned char status = read_port(0x64);
     while (status & 1) {
         receive_byte(status);
         status = read_port(0x64);
     }
-    __asm__ volatile ("sti" : : : "memory");
 }
 
 void keyboard_irq_handler(void)
