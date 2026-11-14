@@ -41,3 +41,7 @@ Digite um comando no prompt `>` e pressione **Enter**. Use **Backspace** para co
 | `kernel/keyboard.c` e `kernel/keyboard_irq.S` | Leem o teclado e atendem às interrupções do teclado e do timer. |
 | `kernel/timer.c` | Configura o PIT e conta o tempo desde o boot. |
 | `kernel/shell.c` | Controla o prompt e executa os comandos. |
+
+## Licença
+
+O GPT-R OS é licenciado sob a [GNU General Public License v3.0](LICENSE.md).
