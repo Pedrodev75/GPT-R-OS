@@ -1,46 +1,50 @@
 # GPT-R OS
 
-GPT-R OS é um sistema operacional experimental para x86-64, escrito em C e Assembly. Ele inicia via BIOS com um bootloader próprio. A versão **v0.2.0** traz um shell de texto e uma tela de diagnóstico para exceções da CPU.
+GPT-R OS é um sistema operacional experimental para x86-64, escrito em C e Assembly. Ele inicia via BIOS com um bootloader próprio e roda no QEMU.
+
+Na **v0.2.5**, o bootloader coleta o mapa de memória da BIOS por E820. O shell ganhou o comando `mem`, e o kernel passou a reservar e liberar páginas físicas de 4 KiB. Os arquivos do kernel foram organizados por função.
 
 ## Rodar no QEMU
 
-Com o QEMU instalado no Windows, coloque a imagem `GPT-R-OS_V0.2.0.img` na raiz do projeto. Abra o PowerShell nessa pasta e execute:
+Com o QEMU instalado no Windows, coloque a imagem da v0.2.5 na raiz do projeto com o nome `os.img`. Abra o PowerShell nessa pasta e rode:
 
 ```powershell
-& "C:\Program Files\qemu\qemu-system-x86_64.exe" -drive "file=GPT-R-OS_V0.2.0.img,format=raw,if=floppy" -boot a
+& "C:\Program Files\qemu\qemu-system-x86_64.exe" -m 128 -drive "file=os.img,format=raw,if=floppy" -boot a
 ```
 
-Se o QEMU foi instalado em outro local, ajuste o caminho do executável. A imagem `os.img` é distribuída separadamente do código-fonte.
+Se o QEMU estiver instalado em outra pasta, ajuste o caminho do executável.
 
 ## Shell
 
-Digite um comando no prompt `>` e pressione **Enter**. Use **Backspace** para corrigir o texto.
+Digite um comando no prompt `>` e pressione **Enter**. Use **Backspace** para corrigir a linha.
 
 | Comando | Resultado |
 |---|---|
 | `help` | Lista os comandos disponíveis. |
 | `clear` | Limpa o terminal e preserva o cabeçalho e o contador de tempo. |
-| `version` | Mostra `GPT-R OS v0.2.0`. |
+| `version` | Mostra `GPT-R OS v0.2.5`. |
 | `uptime` | Mostra os segundos decorridos desde o boot. |
+| `mem` | Lista as regiões E820, a RAM utilizável reportada pela BIOS e as páginas de 4 KiB livres. |
+
+O alocador gerencia páginas entre **1 MiB e 2 MiB**, dentro da faixa mapeada pelo kernel. O total mostrado por `mem` inclui a RAM utilizável que a BIOS reporta fora dessa faixa.
 
 ## Recursos
 
 - Console VGA em modo texto com cursor piscante.
-- Teclado PS/2 com layout ABNT2, acentos e atendimento pela IRQ1.
+- Teclado PS/2 com layout ABNT2 e atendimento pela IRQ1.
 - Timer PIT pela IRQ0 com contador de tempo ligado.
-- IDT de 64 bits com tela de exceção que exibe nome da falha, vetor, código de erro e registradores. Em falhas de página, exibe também o endereço em `CR2`.
+- IDT de 64 bits com tela de exceção que mostra o nome da falha, o vetor, o código de erro e os registradores. Em falhas de página, também exibe o endereço em `CR2`.
 
 ## Estrutura
 
 | Caminho | Responsabilidade |
 |---|---|
-| `boot/boot.S` | Carrega o kernel e coloca a CPU em modo de 64 bits. |
-| `boot/layout.ld` | Define a disposição do código e dos dados na imagem. |
-| `kernel/kernel.c` | Inicializa o sistema e inicia o shell. |
-| `kernel/idt.c` e `kernel/exceptions.S` | Configuram a IDT e tratam exceções da CPU. |
-| `kernel/keyboard.c` e `kernel/keyboard_irq.S` | Leem o teclado e atendem às interrupções do teclado e do timer. |
-| `kernel/timer.c` | Configura o PIT e conta o tempo desde o boot. |
-| `kernel/shell.c` | Controla o prompt e executa os comandos. |
+| `boot/` | Bootloader BIOS, coleta do mapa E820 e layout da imagem. |
+| `kernel/kernel.c` | Inicializa o kernel e chama o shell. |
+| `kernel/memory/` | Estrutura do mapa E820 e alocador de páginas físicas. |
+| `kernel/interrupts/` | IDT e rotinas de entrada das exceções e IRQs. |
+| `kernel/drivers/` | Drivers do teclado PS/2 e do timer PIT. |
+| `kernel/shell/` | Prompt e comandos do shell. |
 
 ## Licença
 
