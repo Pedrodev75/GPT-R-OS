@@ -39,6 +39,7 @@ disk_error:
 
 .section .stage2,"ax"
 stage2:
+    call collect_e820
     cli
     xor ax, ax
     mov ds, ax
@@ -68,6 +69,59 @@ stage2:
     or eax, 0x80000001
     mov cr0, eax
     ljmp 0x08, long_mode
+
+# Handoff at physical 0x5000: count (u16), status (u16), then
+# up to 128 entries of 24 bytes. Entries end before 0x5c04.
+collect_e820:
+    xor ax, ax
+    mov ds, ax
+    mov word ptr [0x5000], ax
+    mov word ptr [0x5002], ax
+    xor ebx, ebx
+    mov di, 0x5004
+.e820_next:
+    xor ax, ax
+    mov es, ax
+    mov dword ptr es:[di + 20], 1
+    mov eax, 0xe820
+    mov edx, 0x534d4150
+    mov ecx, 24
+    push ds
+    push di
+    int 0x15
+    pop di
+    pop ds
+    jc .e820_incomplete
+    cmp eax, 0x534d4150
+    jne .e820_incomplete
+    cmp ecx, 20
+    jb .e820_incomplete
+    # Older BIOSes return only the 20-byte descriptor.
+    cmp ecx, 24
+    jb .e820_length
+    test byte ptr [di + 20], 1
+    jz .e820_continue
+.e820_length:
+    mov eax, [di + 8]
+    or eax, [di + 12]
+    jz .e820_continue
+    inc word ptr [0x5000]
+    add di, 24
+.e820_continue:
+    test ebx, ebx
+    jz .e820_done
+    cmp word ptr [0x5000], 128
+    je .e820_incomplete
+    jmp .e820_next
+.e820_done:
+    mov word ptr [0x5002], 1
+    ret
+.e820_incomplete:
+    cmp word ptr [0x5000], 0
+    je .e820_return
+    mov word ptr [0x5002], 2
+.e820_return:
+    ret
 
 .balign 8
 gdt:

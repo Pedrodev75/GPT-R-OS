@@ -32,7 +32,7 @@ static void clear_row(unsigned int row)
 
 enum { FIRST_ROW = 2, PROMPT_WIDTH = 2, MAX_INPUT = WIDTH - PROMPT_WIDTH };
 
-static void next_row(unsigned int *row)
+static void next_row(unsigned int* row)
 {
     if (*row < HEIGHT - 1) {
         ++*row;
@@ -43,7 +43,7 @@ static void next_row(unsigned int *row)
     clear_row(*row);
 }
 
-static void print_line(unsigned int *row, const char *text)
+static void print_line(unsigned int* row, const char* text)
 {
     unsigned int col = 0;
     while (*text)
@@ -51,7 +51,7 @@ static void print_line(unsigned int *row, const char *text)
     next_row(row);
 }
 
-static int equals(const unsigned char *input, const char *command)
+static int equals(const unsigned char* input, const char* command)
 {
     while (*input && *input == (unsigned char)*command) {
         ++input;
@@ -60,10 +60,10 @@ static int equals(const unsigned char *input, const char *command)
     return *input == 0 && *command == 0;
 }
 
-static void show_uptime(unsigned int *row)
+static void show_uptime(unsigned int* row)
 {
     char text[23];
-    char *start = text + sizeof(text) - 1;
+    char* start = text + sizeof(text) - 1;
     unsigned long long value = timer_uptime_seconds();
     *start = 0;
     *--start = 's';
@@ -75,7 +75,70 @@ static void show_uptime(unsigned int *row)
     print_line(row, start);
 }
 
-static void execute(unsigned int *row, unsigned char *line, unsigned int length)
+/* physical 0x5000, populated by collect_e820 in boot.S */
+struct e820_entry {
+    unsigned long long base, length;
+    unsigned int type, attributes;
+} __attribute__((packed));
+
+struct e820_map {
+    unsigned short count, status;
+    struct e820_entry entries[128];
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct e820_entry) == 24, "E820 entry size");
+
+static void hex64(char* text, unsigned long long value)
+{
+    for (int i = 15; i >= 0; --i) {
+        text[i] = "0123456789ABCDEF"[value & 15];
+        value >>= 4;
+    }
+}
+
+static void show_memory(unsigned int* row)
+{
+    const volatile struct e820_map* const map =
+        (const volatile struct e820_map*)0x5000;
+    const unsigned int count = map->count;
+    if (map->status == 0 || count > 128 || !count) {
+        print_line(row, "Mapa E820 indisponivel");
+        return;
+    }
+    if (map->status != 1)
+        print_line(row, "Mapa E820 incompleto");
+
+    print_line(row, "Base fisica        Tamanho (bytes)    Tipo E820");
+    unsigned long long usable = 0;
+    for (unsigned int i = 0; i < count; ++i) {
+        const volatile struct e820_entry* entry = &map->entries[i];
+        const unsigned long long length = entry->length;
+        const unsigned int type = entry->type;
+        char line[] = "0x0000000000000000 0x0000000000000000 0x0000000000000000";
+        hex64(line + 2, entry->base);
+        hex64(line + 21, length);
+        hex64(line + 40, type);
+        print_line(row, line);
+        if (type == 1)
+            usable += length;
+    }
+    print_line(row, "Tipo 1 = RAM utilizavel segundo a BIOS");
+    char total[] = "RAM utilizavel (MiB):                     ";
+    char* end = total + sizeof(total) - 1;
+    char* digit = end;
+    usable >>= 20;
+    do {
+        *--digit = '0' + usable % 10;
+        usable /= 10;
+    } while (usable);
+    char* output = total + sizeof("RAM utilizavel (MiB): ") - 1;
+    while (digit < end)
+        *output++ = *digit++;
+    *output = 0;
+    print_line(row, total);
+}
+
+static void execute(unsigned int* row, unsigned char* line, unsigned int length)
 {
     while (length && *line == ' ') {
         ++line;
@@ -90,22 +153,30 @@ static void execute(unsigned int *row, unsigned char *line, unsigned int length)
         print_line(row, "clear    Limpa o terminal");
         print_line(row, "version  Mostra a versao");
         print_line(row, "uptime   Mostra o tempo ligado");
-    } else if (equals(line, "clear")) {
+        print_line(row, "mem      Mostra o mapa E820");
+    }
+    else if (equals(line, "clear")) {
         for (unsigned int i = FIRST_ROW; i < HEIGHT; ++i)
             clear_row(i);
         *row = FIRST_ROW;
-    } else if (equals(line, "version")) {
+    }
+    else if (equals(line, "version")) {
         print_line(row, "GPT-R OS v0.2.0");
-    } else if (equals(line, "uptime")) {
+    }
+    else if (equals(line, "uptime")) {
         show_uptime(row);
-    } else if (length) {
+    }
+    else if (equals(line, "mem")) {
+        show_memory(row);
+    }
+    else if (length) {
         print_line(row, "Comando desconhecido");
     }
 }
 
 _Noreturn void shell_run(void)
 {
-    struct keyboard_state keyboard = {0};
+    struct keyboard_state keyboard = { 0 };
     unsigned char line[MAX_INPUT + 1];
     unsigned int row = FIRST_ROW;
 
@@ -121,7 +192,8 @@ _Noreturn void shell_run(void)
             if (ch == '\b') {
                 if (length)
                     vga[row * WIDTH + PROMPT_WIDTH + --length] = TEXT_COLOR | ' ';
-            } else if (length < MAX_INPUT) {
+            }
+            else if (length < MAX_INPUT) {
                 line[length++] = ch;
                 vga[row * WIDTH + col] = TEXT_COLOR | ch;
             }
