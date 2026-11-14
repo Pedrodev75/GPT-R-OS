@@ -125,9 +125,9 @@ static void show_memory(unsigned int* row)
         *output++ = *digit++;
     *output = 0;
     print_line(row, total);
-    char pages[] = "Paginas livres de 4 KiB: 000";
+    char pages[] = "Paginas livres de 4 KiB: 000000";
     unsigned int free = pages_free_count();
-    for (unsigned int i = sizeof(pages) - 2; i >= sizeof(pages) - 4; --i) {
+    for (unsigned int i = sizeof(pages) - 2; i >= sizeof(pages) - 7; --i) {
         pages[i] = '0' + free % 10;
         free /= 10;
     }

@@ -88,6 +88,18 @@ void kernel_main(void)
         vga[i] = TEXT_COLOR | title[i];
 
     pages_init(E820_MAP);
+#ifdef GPT_R_TEST_PAGE_FAULT
+    volatile unsigned char* page = page_alloc();
+    if ((unsigned long long)page < 0x200000)
+        __asm__ volatile ("ud2");
+    page[0] = 0xaa;
+    page[4095] = 0x55;
+    if (page[0] != 0xaa || page[4095] != 0x55 || !page_free((void*)page))
+        __asm__ volatile ("ud2");
+
+    /* PDPT entry 1 is absent, even with 1 GiB or more installed. */
+    __asm__ volatile ("movb (%0), %%al" : : "r"(0x40000000ull) : "rax", "memory");
+#endif
     timer_init();
     keyboard_irq_init();
     __asm__ volatile ("sti" : : : "memory");
