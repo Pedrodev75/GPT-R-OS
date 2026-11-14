@@ -1,11 +1,13 @@
 #include "timer.h"
 
-enum { PIT_HZ = 1193182, TICKS_PER_SECOND = 100,
-       DIVISOR = (PIT_HZ + TICKS_PER_SECOND / 2) / TICKS_PER_SECOND,
-       COUNTER_COLUMN = 54 };
+enum {
+    PIT_HZ = 1193182, TICKS_PER_SECOND = 100,
+    DIVISOR = (PIT_HZ + TICKS_PER_SECOND / 2) / TICKS_PER_SECOND,
+    COUNTER_COLUMN = 54
+};
 
 static unsigned int ticks;
-static unsigned long long seconds;
+static volatile unsigned long long seconds;
 
 static void out(unsigned short port, unsigned char value)
 {
@@ -18,8 +20,8 @@ static void show_uptime(void)
     char digits[10];
     unsigned long long value = seconds;
     unsigned int length = 0;
-    volatile unsigned short *cell =
-        (volatile unsigned short *)0xb8000 + COUNTER_COLUMN;
+    volatile unsigned short* cell =
+        (volatile unsigned short*)0xb8000 + COUNTER_COLUMN;
 
     for (unsigned int i = 0; label[i]; ++i)
         *cell++ = 0x0f00 | label[i];
@@ -53,4 +55,9 @@ void timer_irq_handler(void)
         show_uptime();
     }
     out(0x20, 0x20);
+}
+
+unsigned long long timer_uptime_seconds(void)
+{
+    return seconds;
 }
