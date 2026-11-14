@@ -1,10 +1,30 @@
 #include "keyboard.h"
 
 /* PS/2 scan code set 1, using the BIOS controller's translation. */
-static const char normal[] =
-"\0\0331234567890-=\b\tqwertyuiop[]\n\0asdfghjkl;'\x60\0\\zxcvbnm,./\0*\0 ";
-static const char shifted[] =
-"\0\033!@#$%^&*()_+\b\tQWERTYUIOP{}\n\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
+/* ABNT2 scan codes, translated by the PS/2 controller to set 1. */
+static const unsigned char normal[128] = {
+    [2] = '1', '2','3','4','5','6','7','8','9','0','-','=',
+    '\b',[16] = 'q','w','e','r','t','y','u','i','o','p', 0xf0,'[',
+    '\n',[30] = 'a','s','d','f','g','h','j','k','l', 0x80,0xf2,'\'',
+    [43] = ']', 'z','x','c','v','b','n','m',',','.',';',[55] = '*',
+    [57] = ' ',[0x56] = '\\',[0x73] = '/',[0x7e] = '.'
+};
+static const unsigned char shifted[128] = {
+    [2] = '!', '@','#','$','%','^','&','*','(',')','_','+',
+    '\b',[16] = 'Q','W','E','R','T','Y','U','I','O','P',0xf1,'{',
+    '\n',[30] = 'A','S','D','F','G','H','J','K','L',0x81,0xf3,'"',
+    [43] = '}', 'Z','X','C','V','B','N','M','<','>',':',[55] = '*',
+    [57] = ' ',[0x56] = '|',[0x73] = '?',[0x7e] = '.'
+};
+
+static unsigned char compose(unsigned char accent, unsigned char ch)
+{
+    static const char vowels[] = "aeiouAEIOU";
+    for (unsigned int i = 0; vowels[i]; ++i)
+        if (ch == vowels[i])
+            return 0x82 + (accent - 0xf0) * 10 + i;
+    return 0;
+}
 
 static unsigned char read_port(unsigned short port)
 {
@@ -13,8 +33,13 @@ static unsigned char read_port(unsigned short port)
     return value;
 }
 
-char keyboard_read_char(struct keyboard_state* keyboard)
+unsigned char keyboard_read_char(struct keyboard_state* keyboard)
 {
+    if (keyboard->pending) {
+        const unsigned char ch = keyboard->pending;
+        keyboard->pending = 0;
+        return ch;
+    }
     unsigned int skip = 0;
 
     for (;;) {
@@ -50,13 +75,31 @@ char keyboard_read_char(struct keyboard_state* keyboard)
             keyboard->caps_down = !released;
             continue;
         }
-        if (released || code >= sizeof(normal) - 1)
+        if (released || code >= sizeof(normal))
             continue;
 
-        const char plain = normal[code];
-        const int letter = plain >= 'a' && plain <= 'z';
-        const char ch = (!!keyboard->shifts ^ (letter && keyboard->caps)) ? shifted[code] : plain;
-        if (ch == '\n' || ch == '\b' || (ch >= ' ' && ch <= '~'))
-            return ch;
+        const unsigned char plain = normal[code];
+        const int letter = (plain >= 'a' && plain <= 'z') || plain == 0x80;
+        unsigned char ch = (!!keyboard->shifts ^ (letter && keyboard->caps))
+            ? shifted[code] : plain;
+        if (!ch)
+            continue;
+        if (ch >= 0xf0 && !keyboard->accent) {
+            keyboard->accent = ch;
+            continue;
+        }
+        if (keyboard->accent) {
+            const unsigned char accent = keyboard->accent;
+            keyboard->accent = 0;
+            if (ch == '\b')
+                continue;
+            const unsigned char combined = compose(accent, ch);
+            if (combined)
+                return combined;
+            if (ch != ' ')
+                keyboard->pending = ch;
+            return accent;
+        }
+        return ch;
     }
 }
