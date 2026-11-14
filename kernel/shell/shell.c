@@ -1,8 +1,8 @@
-#include "e820.h"
-#include "pages.h"
+#include "../memory/e820.h"
+#include "../memory/pages.h"
 #include "shell.h"
-#include "keyboard.h"
-#include "timer.h"
+#include "../drivers/keyboard.h"
+#include "../drivers/timer.h"
 
 enum { WIDTH = 80, HEIGHT = 25, TEXT_COLOR = 0x0f00 };
 static volatile unsigned short* const vga = (volatile unsigned short*)0xb8000;
