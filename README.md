@@ -4,10 +4,10 @@ GPT-R OS é um sistema operacional experimental para x86-64, escrito em C e Asse
 
 ## Rodar no QEMU
 
-Com o QEMU instalado no Windows, coloque a imagem `os.img` na raiz do projeto. Abra o PowerShell nessa pasta e execute:
+Com o QEMU instalado no Windows, coloque a imagem `GPT-R-OS_V0.2.0.img` na raiz do projeto. Abra o PowerShell nessa pasta e execute:
 
 ```powershell
-& "C:\Program Files\qemu\qemu-system-x86_64.exe" -drive "file=os.img,format=raw,if=floppy" -boot a
+& "C:\Program Files\qemu\qemu-system-x86_64.exe" -drive "file=GPT-R-OS_V0.2.0.img,format=raw,if=floppy" -boot a
 ```
 
 Se o QEMU foi instalado em outro local, ajuste o caminho do executável. A imagem `os.img` é distribuída separadamente do código-fonte.
