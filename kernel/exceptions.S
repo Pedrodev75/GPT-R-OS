@@ -45,11 +45,24 @@ exception 30, 1
 exception 31
 
 exception_common:
+    # Save the interrupted registers before passing the frame to C.
+    push r15
+    push r14
+    push r13
+    push r12
+    push r11
+    push r10
+    push r9
+    push r8
+    push rbp
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push rbx
+    push rax
     cld
-    # The stubs normalize the frame to vector, error code, RIP.
-    mov rdi, [rsp]
-    mov rsi, [rsp + 8]
-    mov rdx, [rsp + 16]
+    mov rdi, rsp
     and rsp, -16
     call exception_panic
 

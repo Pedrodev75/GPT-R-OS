@@ -47,34 +47,89 @@ void idt_init(void)
     __asm__ volatile ("lidt %0" : : "m"(pointer) : "memory");
 }
 
-static void write_line(unsigned int row, const char* label,
+/* Matches the pushes in exceptions.S and the 64-bit CPU frame. */
+struct exception_frame {
+    unsigned long long gpr[15];
+    unsigned long long vector, error, rip, cs, rflags, rsp, ss;
+};
+
+static const char* const exception_names[EXCEPTION_COUNT] = {
+    [0] = "#DE - Erro de divisao",
+    [1] = "#DB - Depuracao",
+    [2] = "NMI - Interrupcao nao mascaravel",
+    [3] = "#BP - Ponto de parada",
+    [4] = "#OF - Overflow",
+    [5] = "#BR - Limite excedido",
+    [6] = "#UD - Instrucao invalida",
+    [7] = "#NM - Unidade de ponto flutuante indisponivel",
+    [8] = "#DF - Falha dupla",
+    [9] = "Segmento do coprocessador excedido",
+    [10] = "#TS - TSS invalido",
+    [11] = "#NP - Segmento ausente",
+    [12] = "#SS - Falha de pilha",
+    [13] = "#GP - Falha de protecao geral",
+    [14] = "#PF - Falha de pagina",
+    [16] = "#MF - Excecao x87",
+    [17] = "#AC - Verificacao de alinhamento",
+    [18] = "#MC - Erro de hardware",
+    [19] = "#XM - Excecao SIMD",
+    [20] = "#VE - Excecao de virtualizacao",
+    [21] = "#CP - Falha de protecao de controle",
+    [28] = "#HV - Injetador do hipervisor",
+    [29] = "#VC - Comunicacao com o hipervisor",
+    [30] = "#SX - Excecao de seguranca"
+};
+
+static volatile unsigned short* write_text(volatile unsigned short* cell,
+    const char* text)
+{
+    while (*text)
+        *cell++ = 0x4f00 | (unsigned char)*text++;
+    return cell;
+}
+
+static void write_hex(volatile unsigned short* cell, const char* label,
     unsigned long long value)
 {
     static const char hex[] = "0123456789ABCDEF";
-    volatile unsigned short* cell =
-        (volatile unsigned short*)0xb8000 + row * 80;
-
-    while (*label)
-        *cell++ = 0x4f00 | (unsigned char)*label++;
+    cell = write_text(cell, label);
+    cell = write_text(cell, " 0x");
     for (int shift = 60; shift >= 0; shift -= 4)
         *cell++ = 0x4f00 | hex[(value >> shift) & 15];
 }
 
-_Noreturn void exception_panic(unsigned long long vector,
-    unsigned long long error,
-    unsigned long long rip)
+_Noreturn void exception_panic(const struct exception_frame* frame)
 {
+    static const char* const labels[] = {
+        "RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "R8",
+        "R9", "R10", "R11", "R12", "R13", "R14", "R15"
+    };
     volatile unsigned short* const vga = (volatile unsigned short*)0xb8000;
-    const char title[] = "GPT-R OS - CPU EXCEPTION";
+    unsigned long long cr2 = 0;
+    if (frame->vector == 14)
+        __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+
+    /* Hide the text cursor on the diagnostic screen. */
+    __asm__ volatile ("outb %%al, %%dx" : : "a"(0x0a), "d"(0x3d4));
+    __asm__ volatile ("outb %%al, %%dx" : : "a"(0x20), "d"(0x3d5));
 
     for (unsigned int i = 0; i < 80 * 25; ++i)
         vga[i] = 0x4f20;
-    for (unsigned int i = 0; title[i]; ++i)
-        vga[i] = 0x4f00 | title[i];
+    write_text(vga, "GPT-R OS - CPU EXCEPTION");
+    const char* name = exception_names[frame->vector];
+    write_text(vga + 80, name ? name : "Vetor reservado");
 
-    write_line(2, "VECTOR 0x", vector);
-    write_line(3, "ERROR  0x", error);
-    write_line(4, "RIP    0x", rip);
+    write_hex(vga + 3 * 80, "VECTOR", frame->vector);
+    write_hex(vga + 3 * 80 + 40, "ERROR", frame->error);
+    write_hex(vga + 4 * 80, "RIP", frame->rip);
+    write_hex(vga + 4 * 80 + 40, "RFLAGS", frame->rflags);
+    write_hex(vga + 5 * 80, "RSP", frame->rsp);
+    if (frame->vector == 14)
+        write_hex(vga + 5 * 80 + 40, "CR2", cr2);
+
+    for (unsigned int i = 0; i < 15; ++i)
+        write_hex(vga + (7 + i / 2) * 80 + (i % 2) * 40,
+            labels[i], frame->gpr[i]);
     for (;;)
         __asm__ volatile ("cli; hlt");
 }
