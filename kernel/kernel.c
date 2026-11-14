@@ -1,3 +1,4 @@
+#include "idt.h"
 #include "keyboard.h"
 
 enum { WIDTH = 80, HEIGHT = 25, TEXT_COLOR = 0x0f00 };
@@ -81,6 +82,11 @@ void kernel_main(void)
     unsigned int row = 2;
     unsigned int col = 2;
 
+    idt_init();
+#ifdef GPT_R_TEST_INVALID_OPCODE
+    __asm__ volatile ("ud2");
+#endif
+    keyboard_irq_init();
     load_accents();
     vga_register(0x3d4, 0x0a, 14);
     vga_register(0x3d4, 0x0b, 15);

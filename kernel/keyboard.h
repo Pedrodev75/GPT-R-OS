@@ -1,6 +1,8 @@
 #ifndef GPT_R_KEYBOARD_H
 #define GPT_R_KEYBOARD_H
 
+void keyboard_irq_init(void);
+
 struct keyboard_state {
     unsigned int shifts;
     int caps;

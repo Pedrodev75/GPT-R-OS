@@ -33,6 +33,74 @@ static unsigned char read_port(unsigned short port)
     return value;
 }
 
+static void write_port(unsigned short port, unsigned char value)
+{
+    __asm__ volatile ("outb %0, %w1" : : "a"(value), "Nd"(port));
+}
+
+enum { QUEUE_MASK = 63 };
+static volatile unsigned char queue[QUEUE_MASK + 1];
+static volatile unsigned int head;
+static volatile unsigned int tail;
+
+static void receive_byte(unsigned char status)
+{
+    const unsigned char byte = read_port(0x60);
+    const unsigned int next = (head + 1) & QUEUE_MASK;
+    if (!(status & 0xe0) && next != tail) {
+        queue[head] = byte;
+        head = next;
+    }
+}
+
+void keyboard_irq_init(void)
+{
+    head = 0;
+    tail = 0;
+
+    /* Remap the two 8259 PICs, then unmask only IRQ1. */
+    write_port(0x21, 0xff);
+    write_port(0xa1, 0xff);
+    write_port(0x20, 0x11);
+    write_port(0xa0, 0x11);
+    write_port(0x21, 0x20);
+    write_port(0xa1, 0x28);
+    write_port(0x21, 0x04);
+    write_port(0xa1, 0x02);
+    write_port(0x21, 0x01);
+    write_port(0xa1, 0x01);
+    write_port(0xa1, 0xff);
+
+    /* The BIOS configured the PS/2 keyboard port and scan-code translation. */
+    write_port(0x21, 0xfd);
+    unsigned char status = read_port(0x64);
+    while (status & 1) {
+        receive_byte(status);
+        status = read_port(0x64);
+    }
+    __asm__ volatile ("sti" : : : "memory");
+}
+
+void keyboard_irq_handler(void)
+{
+    const unsigned char status = read_port(0x64);
+    if (status & 1)
+        receive_byte(status);
+    write_port(0x20, 0x20);
+}
+
+static unsigned char wait_for_scan_code(void)
+{
+    __asm__ volatile ("cli" : : : "memory");
+    while (head == tail)
+        __asm__ volatile ("sti; hlt; cli" : : : "memory");
+
+    const unsigned char byte = queue[tail];
+    tail = (tail + 1) & QUEUE_MASK;
+    __asm__ volatile ("sti" : : : "memory");
+    return byte;
+}
+
 unsigned char keyboard_read_char(struct keyboard_state* keyboard)
 {
     if (keyboard->pending) {
@@ -43,12 +111,7 @@ unsigned char keyboard_read_char(struct keyboard_state* keyboard)
     unsigned int skip = 0;
 
     for (;;) {
-        const unsigned char status = read_port(0x64);
-        if (!(status & 1))
-            continue;
-        const unsigned char key = read_port(0x60);
-        if (status & 0xe0)
-            continue;
+        const unsigned char key = wait_for_scan_code();
 
         if (skip) {
             --skip;

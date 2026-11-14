@@ -18,23 +18,29 @@ struct idt_pointer {
 _Static_assert(sizeof(struct idt_gate) == 16, "Invalid IDT gate size");
 _Static_assert(sizeof(struct idt_pointer) == 10, "Invalid IDTR operand size");
 
-enum { EXCEPTION_COUNT = 32, KERNEL_CODE_SELECTOR = 0x08 };
+enum { EXCEPTION_COUNT = 32, KEYBOARD_VECTOR = 0x21, KERNEL_CODE_SELECTOR = 0x08 };
 extern void (* const exception_entries[EXCEPTION_COUNT])(void);
-static struct idt_gate idt[EXCEPTION_COUNT] __attribute__((aligned(16)));
+extern void keyboard_irq_entry(void);
+static struct idt_gate idt[KEYBOARD_VECTOR + 1] __attribute__((aligned(16)));
+
+static void set_gate(unsigned int vector, void (*entry)(void))
+{
+    const unsigned long long address = (unsigned long long)entry;
+    idt[vector] = (struct idt_gate){
+        .offset_low = address,
+        .selector = KERNEL_CODE_SELECTOR,
+        .attributes = 0x8e,
+        .offset_mid = address >> 16,
+        .offset_high = address >> 32
+    };
+}
 
 void idt_init(void)
 {
-    for (unsigned int i = 0; i < EXCEPTION_COUNT; ++i) {
-        const unsigned long long address =
-            (unsigned long long)exception_entries[i];
-        idt[i] = (struct idt_gate){
-            .offset_low = address,
-            .selector = KERNEL_CODE_SELECTOR,
-            .attributes = 0x8e, /* Present, ring 0, interrupt gate. */
-            .offset_mid = address >> 16,
-            .offset_high = address >> 32
-        };
-    }
+    for (unsigned int i = 0; i < EXCEPTION_COUNT; ++i)
+        set_gate(i, exception_entries[i]);
+    idt[0x20] = (struct idt_gate){ 0 };
+    set_gate(KEYBOARD_VECTOR, keyboard_irq_entry);
 
     const struct idt_pointer pointer = { sizeof(idt) - 1, (unsigned long long)idt };
     __asm__ volatile ("lidt %0" : : "m"(pointer) : "memory");
