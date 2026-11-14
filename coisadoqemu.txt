@@ -1,0 +1,1 @@
+& "C:\Program Files\qemu\qemu-system-x86_64.exe" -drive "file=os-ud2.img,format=raw,if=floppy" -boot a
