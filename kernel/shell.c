@@ -1,3 +1,5 @@
+#include "e820.h"
+#include "pages.h"
 #include "shell.h"
 #include "keyboard.h"
 #include "timer.h"
@@ -75,19 +77,6 @@ static void show_uptime(unsigned int* row)
     print_line(row, start);
 }
 
-/* physical 0x5000, populated by collect_e820 in boot.S */
-struct e820_entry {
-    unsigned long long base, length;
-    unsigned int type, attributes;
-} __attribute__((packed));
-
-struct e820_map {
-    unsigned short count, status;
-    struct e820_entry entries[128];
-} __attribute__((packed));
-
-_Static_assert(sizeof(struct e820_entry) == 24, "E820 entry size");
-
 static void hex64(char* text, unsigned long long value)
 {
     for (int i = 15; i >= 0; --i) {
@@ -99,13 +88,13 @@ static void hex64(char* text, unsigned long long value)
 static void show_memory(unsigned int* row)
 {
     const volatile struct e820_map* const map =
-        (const volatile struct e820_map*)0x5000;
+        E820_MAP;
     const unsigned int count = map->count;
-    if (map->status == 0 || count > 128 || !count) {
+    if (map->status == 0 || count > E820_MAX_ENTRIES || !count) {
         print_line(row, "Mapa E820 indisponivel");
         return;
     }
-    if (map->status != 1)
+    if (map->status != E820_COMPLETE)
         print_line(row, "Mapa E820 incompleto");
 
     print_line(row, "Base fisica        Tamanho (bytes)    Tipo E820");
@@ -119,7 +108,7 @@ static void show_memory(unsigned int* row)
         hex64(line + 21, length);
         hex64(line + 40, type);
         print_line(row, line);
-        if (type == 1)
+        if (type == E820_USABLE)
             usable += length;
     }
     print_line(row, "Tipo 1 = RAM utilizavel segundo a BIOS");
@@ -136,6 +125,13 @@ static void show_memory(unsigned int* row)
         *output++ = *digit++;
     *output = 0;
     print_line(row, total);
+    char pages[] = "Paginas livres de 4 KiB: 000";
+    unsigned int free = pages_free_count();
+    for (unsigned int i = sizeof(pages) - 2; i >= sizeof(pages) - 4; --i) {
+        pages[i] = '0' + free % 10;
+        free /= 10;
+    }
+    print_line(row, pages);
 }
 
 static void execute(unsigned int* row, unsigned char* line, unsigned int length)

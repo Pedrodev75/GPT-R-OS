@@ -1,3 +1,4 @@
+#include "pages.h"
 #include "idt.h"
 #include "timer.h"
 #include "keyboard.h"
@@ -86,6 +87,7 @@ void kernel_main(void)
     for (unsigned int i = 0; title[i]; ++i)
         vga[i] = TEXT_COLOR | title[i];
 
+    pages_init(E820_MAP);
     timer_init();
     keyboard_irq_init();
     __asm__ volatile ("sti" : : : "memory");
