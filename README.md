@@ -1,10 +1,10 @@
 GPT-R OS
 Sistema operacional experimental x86-64 escrito em C e Assembly. Inicia via BIOS com bootloader próprio e é desenvolvido para testes no QEMU.
 
-Na v0.3.0, o kernel mapeia blocos de 2 MiB totalmente utilizáveis segundo a BIOS E820, até o primeiro GiB de endereços físicos. O alocador entrega páginas de 4 KiB e preserva a memória reservada. O shell também ganhou comandos para inspecionar e testar memória, reiniciar e mudar as cores.
+A v0.3.5 traz um terminal gráfico VGA em 320×200 com 256 cores. O terminal tem 40 colunas e 18 linhas, fonte bitmap com acentos, cursor piscante e rolagem. O comando demo mostra a paleta VGA e um quadrado interativo.
 Rodar no QEMU
-Coloque a imagem da v0.3.0 com o nome os.img na pasta atual do PowerShell. Ajuste o caminho do QEMU se ele foi instalado em outra pasta.
-& "C:\Program Files\qemu\qemu-system-x86_64.exe" -m 128 -drive "file=os.img,format=raw,if=floppy" -boot a
+Coloque a imagem gráfica da v0.3.5 com o nome os-vga.img na pasta atual do PowerShell. Ajuste o caminho do QEMU se ele foi instalado em outra pasta.
+& "C:\Program Files\qemu\qemu-system-x86_64.exe" -m 128 -drive "file=os-vga.img,format=raw,if=floppy" -boot a
 Shell
 Digite no prompt > e pressione Enter.
 Comando	Resultado
@@ -18,8 +18,10 @@ peek <endereço>	Mostra 16 bytes a partir de um endereço hexadecimal na RAM ger
 reboot	Reinicia o sistema no QEMU PC.
 color <frente> <fundo>	Muda as cores do terminal com índices VGA. Aceita frente de 0 a 15 e fundo de 0 a 7. Exemplo color 15 1.
 crash <tipo>	Aciona um teste de diagnóstico.
+demo	Abre a demonstração interativa de vídeo no modo gráfico.
 
 
+Na demo, use as setas para mover o quadrado. O timer PIT anima a cor enquanto a demonstração está aberta. Pressione Esc para voltar ao terminal com o histórico e as cores preservados.
 Diagnóstico
 Tipo	Resultado esperado
 ud	ud2 gera #UD (vetor 6).
@@ -39,8 +41,8 @@ boot/	Bootloader BIOS, coleta E820 e layout da imagem.
 kernel/kernel.c	Inicializa o kernel e chama o shell.
 kernel/memory/	Paginação, mapa E820 e alocador de páginas físicas.
 kernel/interrupts/	IDT, entradas de IRQ e diagnóstico de exceções.
-kernel/drivers/	Teclado PS/2 ABNT2 por IRQ1 e timer PIT por IRQ0.
-kernel/shell/	Terminal VGA e comandos.
+kernel/drivers/	Teclado PS/2 ABNT2, timer PIT e renderização gráfica VGA.
+kernel/shell/	Prompt e comandos do shell.
 
 
 Licença

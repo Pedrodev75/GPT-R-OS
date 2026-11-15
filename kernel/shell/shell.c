@@ -376,7 +376,7 @@ static void execute(unsigned int* row, unsigned char* line, unsigned int length
         *row = FIRST_ROW;
     }
     else if (equals(line, "version")) {
-        print_line(row, "GPT-R OS v0.3.0");
+        print_line(row, "GPT-R OS v0.3.5");
     }
     else if (equals(line, "uptime")) {
         print_number(row, "", timer_uptime_seconds(), " s");
