@@ -72,6 +72,8 @@ app_syscall_entry:
     # CS follows the ten saved registers and the interrupted RIP.
     mov rcx, [rbx + 11 * 8]
     call app_syscall
+    # Waiting for a key can enable hardware interrupts. IRET restores user IF.
+    cli
     mov rsp, rbx
     pop rbx
     pop r11

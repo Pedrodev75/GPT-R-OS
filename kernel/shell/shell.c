@@ -18,7 +18,7 @@ static void vga_register(unsigned short port, unsigned char index,
 
 #endif
 
-static void move_cursor(unsigned int row, unsigned int col)
+void shell_move_cursor(unsigned int row, unsigned int col)
 {
     const unsigned int position = row * WIDTH + col;
 #ifdef GPT_R_GRAPHICS
@@ -146,7 +146,7 @@ static const struct command {
     {"sector", "Mostra 16 bytes de um setor", shell_sector, 1},
     {"ls", "Lista arquivos FAT16", shell_ls, 0},
     {"cat", "Le texto com paginacao", shell_cat, 1},
-    {"run", "Executa um programa .APP", shell_run_app, 1},
+    {"run", "Executa um .APP com argumentos", shell_run_app, 1},
     {"write", "Cria ou sobrescreve um arquivo", shell_write, 1},
     {"rm", "Remove um arquivo", shell_rm, 1},
     {"color", "Muda as cores do terminal", command_color, 1},
@@ -214,7 +214,7 @@ _Noreturn void shell_run(unsigned int row)
         console_put(row * WIDTH, console_color | '>');
         for (;;) {
             const unsigned int col = PROMPT_WIDTH + length;
-            move_cursor(row, col < WIDTH ? col : WIDTH - 1);
+            shell_move_cursor(row, col < WIDTH ? col : WIDTH - 1);
             const unsigned char ch = keyboard_read_char(&keyboard);
 #ifdef GPT_R_GRAPHICS
             vga_graphics_cursor(WIDTH * HEIGHT);

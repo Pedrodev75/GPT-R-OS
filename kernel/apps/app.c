@@ -34,8 +34,7 @@ static struct {
     int active;
     unsigned int image_size;
     struct app_result result;
-    void (*output)(void *, const unsigned char *, unsigned int);
-    void *context;
+    const struct app_launch *launch;
 } running;
 
 static unsigned long long enable_nx(void)
@@ -114,9 +113,35 @@ static void flush_tlb(void)
     __asm__ volatile ("mov %%cr3, %0; mov %0, %%cr3" : "=&r"(root) : : "memory");
 }
 
+static unsigned long long build_user_stack(unsigned char *stack,
+    const struct app_launch *launch)
+{
+    if (!launch->argc || launch->argc > APP_ARG_LIMIT ||
+        !launch->args_size || launch->args_size > APP_ARG_BYTES)
+        return 0;
+
+    const unsigned int strings_at = PAGE_SIZE - launch->args_size;
+    const unsigned int frame_at =
+        (strings_at - (launch->argc + 2) * sizeof(unsigned long long)) & ~15u;
+    unsigned long long *frame = (void *)(stack + frame_at);
+    unsigned int copied = 0;
+    frame[0] = launch->argc;
+    for (unsigned int i = 0; i < launch->argc; ++i) {
+        frame[i + 1] = USER_STACK + strings_at + copied;
+        unsigned char ch;
+        do {
+            if (copied == launch->args_size)
+                return 0;
+            ch = launch->args[copied];
+            stack[strings_at + copied++] = ch;
+        } while (ch);
+    }
+    frame[launch->argc + 1] = 0;
+    return copied == launch->args_size ? USER_STACK + frame_at : 0;
+}
+
 static struct app_result execute_image(void *image, void *stack, unsigned int size,
-    unsigned int entry, void (*output)(void *, const unsigned char *, unsigned int),
-    void *context)
+    unsigned int entry, unsigned long long user_rsp, const struct app_launch *launch)
 {
     volatile unsigned long long *const pml4 = (void *)0x1000;
     volatile unsigned long long *const pdpt = (void *)0x2000;
@@ -136,10 +161,9 @@ static struct app_result execute_image(void *image, void *stack, unsigned int si
     flush_tlb();
 
     running.image_size = size;
-    running.output = output;
-    running.context = context;
+    running.launch = launch;
     running.active = 1;
-    app_enter(USER_IMAGE + entry, USER_STACK + PAGE_SIZE);
+    app_enter(USER_IMAGE + entry, user_rsp);
 
     running.active = 0;
     pdpt[USER_PDPT_SLOT] = 0;
@@ -153,8 +177,7 @@ static struct app_result execute_image(void *image, void *stack, unsigned int si
 }
 
 struct app_result app_run(const struct fat16_volume *volume,
-    const struct fat16_file *file,
-    void (*output)(void *, const unsigned char *, unsigned int), void *context)
+    const struct fat16_file *file, const struct app_launch *launch)
 {
     if (file->size <= HEADER_SIZE || file->size > HEADER_SIZE + PAGE_SIZE)
         return (struct app_result){ .status = APP_INVALID };
@@ -175,10 +198,15 @@ struct app_result app_run(const struct fat16_volume *volume,
             if (stack) {
                 for (unsigned int i = 0; i < PAGE_SIZE; ++i)
                     stack[i] = 0;
-                return execute_image(image, stack, file->size - HEADER_SIZE,
-                    entry, output, context);
+                const unsigned long long rsp = build_user_stack(stack, launch);
+                if (rsp)
+                    return execute_image(image, stack, file->size - HEADER_SIZE,
+                        entry, rsp, launch);
+                page_free(stack);
+                failure = APP_BAD_ARGS;
+            } else {
+                failure = APP_NO_MEMORY;
             }
-            failure = APP_NO_MEMORY;
         }
     }
     page_free(image);
@@ -200,14 +228,20 @@ long long app_syscall(unsigned long long number, unsigned long long argument,
         running.result = (struct app_result){ .status = APP_EXITED, .exit_code = argument };
         app_leave();
     }
-    if (number != 1)
+    if (number != 1 && number != 3)
         return -1;
     if (length == 0)
         return 0;
-    if (!contains(argument, length, USER_IMAGE, running.image_size) &&
-        !contains(argument, length, USER_STACK, PAGE_SIZE))
+    const int in_stack = contains(argument, length, USER_STACK, PAGE_SIZE);
+    const struct app_launch *launch = running.launch;
+    if (number == 3) {
+        if (!in_stack)
+            return -1;
+        return launch->input(launch->context, (unsigned char *)argument, (unsigned int)length);
+    }
+    if (!in_stack && !contains(argument, length, USER_IMAGE, running.image_size))
         return -1;
-    running.output(running.context, (const unsigned char *)argument, (unsigned int)length);
+    launch->output(launch->context, (const unsigned char *)argument, (unsigned int)length);
     return (long long)length;
 }
 

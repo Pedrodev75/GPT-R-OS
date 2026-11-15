@@ -1,6 +1,6 @@
 # Executáveis .APP do GPT-R OS
 
-A versão 1 do formato guarda uma imagem plana de código e dados constantes x86-64. O programa deve usar endereçamento relativo à posição e manter dados mutáveis na pilha. O comando `run <arquivo.APP>` carrega e executa essa imagem em ring 3. O shell executa um programa por vez.
+A versão 1 do formato guarda uma imagem plana de código e dados constantes x86-64. O programa deve usar endereçamento relativo à posição e manter dados mutáveis na pilha. O comando `run <arquivo.APP> [argumentos]` carrega e executa essa imagem em ring 3. O shell executa um programa por vez.
 
 ## Cabeçalho
 
@@ -17,12 +17,17 @@ Todos os inteiros usam little-endian. O arquivo tem exatamente 32 bytes de cabe�
 
 ## Chamadas ao kernel
 
-A ABI usa `int 0x80`. O código inicia com uma pilha alinhada a 16 bytes, sem argumentos. Ao terminar, deve chamar `exit`.
+A ABI usa `int 0x80`. Ao terminar, o programa chama `exit`.
+
+Na entrada, `RSP` está alinhado a 16 bytes e aponta para `argc` (64 bits). O vetor `argv` começa em `RSP + 8` e termina com um ponteiro nulo. `argv[0]` contém o nome do arquivo e os argumentos seguintes chegam em UTF-8, terminados em NUL. O shell separa palavras por espaços. Por exemplo, em `run eco.APP Ola mundo`, `argc` vale 3.
 
 | RAX | Chamada | Argumentos e retorno |
 |---|---|---|
 | 1 | `write` | RDI aponta para o texto UTF-8, RSI informa o comprimento em bytes. RAX retorna o número de bytes consumidos ou um erro negativo. O kernel verifica toda a faixa indicada. |
 | 2 | `exit` | RDI contém o código de saída. O kernel encerra o programa e volta ao shell. |
+| 3 | `read` | RDI aponta para um buffer gravável na pilha e RSI indica a capacidade incluindo o NUL. Lê uma linha UTF-8 até Enter e retorna os bytes escritos, sem contar o NUL. |
+
+Na chamada `read`, Backspace apaga o último caractere inteiro. A digitação ocupa uma linha e caracteres adicionais são ignorados quando o buffer ou a linha fica cheia. Capacidade zero retorna zero imediatamente. Um buffer fora da pilha retorna `-1`.
 
 ## Gerar OLA.APP no Windows
 
@@ -38,6 +43,8 @@ O shell compara o nome exatamente como aparece no `ls`. Na imagem de HD de teste
 
 | Comando | Resultado |
 |---|---|
+| `run eco.APP Ola mundo` | Mostra os argumentos separados por espaços. |
+| `run nome.APP` | Pede seu nome e exibe uma saudação depois de Enter. |
 | `run ola.APP` | Exibe uma mensagem, mostra o código de saída 0 e volta ao prompt. |
 | `run FALHA.APP` | Executa `ud2`, mostra o vetor 6 e volta ao prompt. |
 | `run INVALIDO.APP` | Recusa um cabeçalho inválido e volta ao prompt. |

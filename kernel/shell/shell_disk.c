@@ -153,22 +153,29 @@ static unsigned char codepoint_glyph(unsigned int codepoint)
     return codepoint == 0x00b4 ? 0xf0 : '?';
 }
 
+static unsigned int encode_glyph(unsigned char *bytes, unsigned char glyph)
+{
+    const unsigned int cp = glyph_codepoint(glyph);
+    if (cp < 0x80) {
+        bytes[0] = cp;
+        return 1;
+    }
+    if (cp < 0x800) {
+        bytes[0] = 0xc0 | (cp >> 6);
+        bytes[1] = 0x80 | (cp & 63);
+        return 2;
+    }
+    bytes[0] = 0xe0 | (cp >> 12);
+    bytes[1] = 0x80 | ((cp >> 6) & 63);
+    bytes[2] = 0x80 | (cp & 63);
+    return 3;
+}
+
 static unsigned int encode_text(unsigned char *bytes, const unsigned char *text)
 {
     unsigned int size = 0;
-    while (*text) {
-        const unsigned int cp = glyph_codepoint(*text++);
-        if (cp < 0x80) {
-            bytes[size++] = cp;
-        } else if (cp < 0x800) {
-            bytes[size++] = 0xc0 | (cp >> 6);
-            bytes[size++] = 0x80 | (cp & 63);
-        } else {
-            bytes[size++] = 0xe0 | (cp >> 12);
-            bytes[size++] = 0x80 | ((cp >> 6) & 63);
-            bytes[size++] = 0x80 | (cp & 63);
-        }
-    }
+    while (*text)
+        size += encode_glyph(bytes + size, *text++);
     return size;
 }
 
@@ -314,22 +321,89 @@ void shell_cat(unsigned int *row, const unsigned char *argument)
         shell_print_line(row, "Falha ao ler arquivo ou cadeia FAT16");
 }
 
+static unsigned int read_app_line(void *context, unsigned char *buffer,
+    unsigned int capacity)
+{
+    struct text_output *output = context;
+    if (output->continuation) {
+        text_byte(output, '?');
+        output->continuation = 0;
+    }
+    if (output->col)
+        text_next_row(output);
+
+    unsigned int length = 0;
+    for (;;) {
+        shell_move_cursor(*output->row, output->col);
+        const unsigned int key = shell_wait_key();
+        if (key == '\n')
+            break;
+        if (key == '\b' && length) {
+            do {
+                --length;
+            } while (length && (buffer[length] & 0xc0) == 0x80);
+            console_put(*output->row * WIDTH + --output->col, console_color | ' ');
+        } else if (key >= ' ' && key <= 255 && output->col < WIDTH - 1) {
+            unsigned char bytes[3];
+            const unsigned int size = encode_glyph(bytes, key);
+            if (size < capacity - length) {
+                for (unsigned int i = 0; i < size; ++i)
+                    buffer[length++] = bytes[i];
+                text_byte(output, key);
+            }
+        }
+    }
+#ifdef GPT_R_GRAPHICS
+    vga_graphics_cursor(WIDTH * HEIGHT);
+#endif
+    buffer[length] = 0;
+    text_next_row(output);
+    return length;
+}
+
+static int pack_arguments(const unsigned char *text, unsigned char *args,
+    struct app_launch *launch)
+{
+    for (text = shell_skip_spaces(text); *text; text = shell_skip_spaces(text)) {
+        if (launch->argc == APP_ARG_LIMIT)
+            return 0;
+        ++launch->argc;
+        while (*text && *text != ' ') {
+            unsigned char bytes[3];
+            const unsigned int size = encode_glyph(bytes, *text++);
+            if (size >= APP_ARG_BYTES - launch->args_size)
+                return 0;
+            for (unsigned int i = 0; i < size; ++i)
+                args[launch->args_size++] = bytes[i];
+        }
+        args[launch->args_size++] = 0;
+    }
+    return 1;
+}
+
 void shell_run_app(unsigned int *row, const unsigned char *argument)
 {
-    const unsigned char *name = shell_skip_spaces(argument);
-    if (!*name) {
-        shell_print_line(row, "Uso: run <arquivo.APP>");
+    struct text_output output = { .row = row };
+    unsigned char args[APP_ARG_BYTES];
+    struct app_launch launch = {
+        .args = args, .output = text_chunk, .input = read_app_line, .context = &output
+    };
+    if (!pack_arguments(argument, args, &launch)) {
+        shell_print_line(row, "Argumentos demais para run");
+        return;
+    }
+    if (!launch.argc) {
+        shell_print_line(row, "Uso: run <arquivo.APP> [argumentos]");
         return;
     }
 
     struct ata_disk disk;
     struct fat16_volume volume;
     struct fat16_file file;
-    if (!open_volume(row, &disk, &volume) || !find_file(row, &volume, name, &file))
+    if (!open_volume(row, &disk, &volume) || !find_file(row, &volume, args, &file))
         return;
 
-    struct text_output output = { .row = row };
-    const struct app_result result = app_run(&volume, &file, text_chunk, &output);
+    const struct app_result result = app_run(&volume, &file, &launch);
     finish_text(&output);
     switch (result.status) {
     case APP_EXITED:
@@ -352,6 +426,9 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
         break;
     case APP_READ_ERROR:
         shell_print_line(row, "Falha ao ler arquivo ou cadeia FAT16");
+        break;
+    case APP_BAD_ARGS:
+        shell_print_line(row, "Argumentos invalidos");
         break;
     case APP_NO_MEMORY:
         shell_print_line(row, "Sem memoria para executar o programa");

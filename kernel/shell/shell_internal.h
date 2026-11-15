@@ -9,6 +9,7 @@ enum {
 };
 
 unsigned int shell_wait_key(void);
+void shell_move_cursor(unsigned int row, unsigned int col);
 void shell_clear_row(unsigned int row);
 void shell_next_row(unsigned int *row);
 void shell_print_line(unsigned int *row, const char *text);
