@@ -18,6 +18,9 @@ start:
     int 0x10
     pop dx
 
+    test dl, 0x80
+    jnz read_hd
+
     # Read the rest of cylinder zero, then cylinder one head zero.
     push dx
     mov bx, 0x7e00
@@ -48,6 +51,27 @@ start:
     int 0x13
     jc disk_error
     jmp stage2
+read_hd:
+    # Keep the BIOS-selected drive number across the EDD capability check.
+    push dx
+    push ds
+    mov ax, 0x4100
+    mov bx, 0x55aa
+    int 0x13
+    pop ds
+    pop dx
+    jc disk_error
+    cmp bx, 0xaa55
+    jne disk_error
+    test cx, 1
+    jz disk_error
+
+    mov si, offset disk_packet
+    mov ax, 0x4200
+    int 0x13
+    jc disk_error
+    jmp stage2
+
 disk_error:
     mov ax, 0x0e45
     xor bx, bx
@@ -56,6 +80,16 @@ disk_error:
 1:  hlt
     jmp 1b
 
+.balign 4
+disk_packet:
+    .byte 0x10, 0
+    .word 53
+    .word 0x7e00, 0
+    .quad 1
+
+# The HD image builder fills the partition table at bytes 446-509.
+.org 446
+.zero 64
 .org 510
 .word 0xaa55
 
