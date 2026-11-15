@@ -3,9 +3,13 @@
 
 enum {
     PIT_HZ = 1193182, TICKS_PER_SECOND = 100,
-    DIVISOR = (PIT_HZ + TICKS_PER_SECOND / 2) / TICKS_PER_SECOND,
-    COUNTER_CELL = CONSOLE_WIDTH == 40 ? CONSOLE_WIDTH : 54
+    DIVISOR = (PIT_HZ + TICKS_PER_SECOND / 2) / TICKS_PER_SECOND
 };
+#ifdef GPT_R_GRAPHICS
+enum { COUNTER_CELL = CONSOLE_WIDTH };
+#else
+enum { COUNTER_CELL = 54 };
+#endif
 
 static unsigned int ticks;
 static volatile unsigned int total_ticks;

@@ -67,8 +67,60 @@ stage2:
     rep movsb
     mov ds, ax
 
-    mov ax, 0x0013
+    # VBE mode info at 0x6400, after the 8x8 font at 0x6000.
+    mov di, 0x6400
+    xor ax, ax
+    mov cx, 128
+    rep stosw
+    mov di, 0x6400
+    mov ax, 0x4f01
+    mov cx, 0x0112
+    push ds
     int 0x10
+    pop ds
+    cmp ax, 0x004f
+    jne vbe_error
+    mov ax, word ptr [0x6400]
+    and ax, 0x0091
+    cmp ax, 0x0091
+    jne vbe_error
+    cmp word ptr [0x6412], 640
+    jne vbe_error
+    cmp word ptr [0x6414], 480
+    jne vbe_error
+    cmp byte ptr [0x6419], 24
+    jne vbe_error
+    cmp byte ptr [0x641b], 6
+    jne vbe_error
+
+    # Prefer the linear-layout fields when returned by a VBE 3 BIOS.
+    mov si, 0x641f
+    mov ax, word ptr [0x6432]
+    test ax, ax
+    jz .legacy_pitch
+    mov word ptr [0x6410], ax
+    cmp byte ptr [0x6436], 0
+    je .legacy_pitch
+    mov si, 0x6436
+.legacy_pitch:
+    cmp word ptr [si], 0x1008
+    jne vbe_error
+    cmp word ptr [si + 2], 0x0808
+    jne vbe_error
+    cmp word ptr [si + 4], 0x0008
+    jne vbe_error
+    cmp word ptr [0x6410], 1920
+    jb vbe_error
+    cmp word ptr [0x6410], 4096
+    ja vbe_error
+    cmp dword ptr [0x6428], 0x40000000
+    jb vbe_error
+
+    mov ax, 0x4f02
+    mov bx, 0x4112
+    int 0x10
+    cmp ax, 0x004f
+    jne vbe_error
 .endif
     cli
     xor ax, ax
@@ -83,6 +135,24 @@ stage2:
     mov dword ptr [0x1000], 0x2003
     mov dword ptr [0x2000], 0x3003
     mov dword ptr [0x3000], 0x0083  # Identity map the first 2 MiB.
+
+.ifdef GPT_R_GRAPHICS
+    # One more page directory maps the framebuffer window at virtual 4 GiB.
+    # The allocator continues to manage only memory below 1 GiB.
+    mov di, 0x4000
+    mov cx, 0x0800
+    rep stosw
+    mov dword ptr [0x2020], 0x4003
+    mov eax, dword ptr [0x6428]
+    and eax, 0xffe00000
+    or eax, 0x9b  # Present, writable, uncached 2 MiB page.
+    mov dword ptr [0x4000], eax
+    xor edx, edx
+    add eax, 0x200000
+    adc edx, 0
+    mov dword ptr [0x4008], eax
+    mov dword ptr [0x400c], edx
+.endif
 
     lgdt [gdtr]
     mov eax, cr4
@@ -99,6 +169,30 @@ stage2:
     or eax, 0x80000001
     mov cr0, eax
     ljmp 0x08, long_mode
+
+.ifdef GPT_R_GRAPHICS
+vbe_error:
+    mov ax, 3
+    int 0x10
+    xor ax, ax
+    mov ds, ax
+    mov si, offset vbe_error_message
+    cld
+.vbe_print:
+    lodsb
+    test al, al
+    jz .vbe_stop
+    mov ah, 0x0e
+    xor bx, bx
+    int 0x10
+    jmp .vbe_print
+.vbe_stop:
+    cli
+    hlt
+    jmp .vbe_stop
+vbe_error_message:
+    .asciz "GPT-R OS: modo VBE 640x480 indisponivel"
+.endif
 
 # Handoff at physical 0x5000: count (u16), status (u16), then
 # up to 128 entries of 24 bytes. Entries end before 0x5c04.

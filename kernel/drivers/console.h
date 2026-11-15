@@ -4,7 +4,7 @@
 #ifdef GPT_R_GRAPHICS
 #include "vga_graphics.h"
 enum {
-    CONSOLE_WIDTH = VGA_GRAPHICS_WIDTH / VGA_GLYPH_SIZE,
+    CONSOLE_WIDTH = VGA_GRAPHICS_WIDTH / VGA_CELL_WIDTH,
     CONSOLE_HEIGHT = VGA_GRAPHICS_HEIGHT / VGA_LINE_HEIGHT
 };
 #define console_put vga_graphics_put
