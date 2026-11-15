@@ -54,7 +54,7 @@ struct exception_frame {
     unsigned long long vector, error, rip, cs, rflags, rsp, ss;
 };
 
-static const char *const exception_names[EXCEPTION_COUNT] = {
+static const char* const exception_names[EXCEPTION_COUNT] = {
     [0] = "#DE - Erro de divisao",
     [1] = "#DB - Depuracao",
     [2] = "NMI - Interrupcao nao mascaravel",
@@ -82,26 +82,26 @@ static const char *const exception_names[EXCEPTION_COUNT] = {
 };
 
 static unsigned int write_text(unsigned int cell,
-                                            const char *text)
+    const char* text)
 {
     while (*text)
         console_put(cell++, 0x4f00 | (unsigned char)*text++);
     return cell;
 }
 
-static void write_hex(unsigned int cell, const char *label,
-                      unsigned long long value)
+static void write_hex(unsigned int cell, const char* label,
+    unsigned long long value, const char* separator)
 {
     static const char hex[] = "0123456789ABCDEF";
     cell = write_text(cell, label);
-    cell = write_text(cell, " 0x");
+    cell = write_text(cell, separator);
     for (int shift = 60; shift >= 0; shift -= 4)
         console_put(cell++, 0x4f00 | hex[(value >> shift) & 15]);
 }
 
-_Noreturn void exception_panic(const struct exception_frame *frame)
+_Noreturn void exception_panic(const struct exception_frame* frame)
 {
-    static const char *const labels[] = {
+    static const char* const labels[] = {
         "RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "R8",
         "R9", "R10", "R11", "R12", "R13", "R14", "R15"
     };
@@ -118,19 +118,20 @@ _Noreturn void exception_panic(const struct exception_frame *frame)
     for (unsigned int i = 0; i < CONSOLE_WIDTH * CONSOLE_HEIGHT; ++i)
         console_put(i, 0x4f20);
     write_text(0, "GPT-R OS - CPU EXCEPTION");
-    const char *name = exception_names[frame->vector];
+    const char* name = exception_names[frame->vector];
     write_text(CONSOLE_WIDTH, name ? name : "Vetor reservado");
 
-    write_hex(3 * CONSOLE_WIDTH, "VECTOR", frame->vector);
-    write_hex(4 * CONSOLE_WIDTH, "ERROR", frame->error);
-    write_hex(5 * CONSOLE_WIDTH, "RIP", frame->rip);
-    write_hex(6 * CONSOLE_WIDTH, "RFLAGS", frame->rflags);
-    write_hex(7 * CONSOLE_WIDTH, "RSP", frame->rsp);
+    write_hex(3 * CONSOLE_WIDTH, "VECTOR", frame->vector, " 0x");
+    write_hex(4 * CONSOLE_WIDTH, "ERROR", frame->error, " 0x");
+    write_hex(5 * CONSOLE_WIDTH, "RIP", frame->rip, " 0x");
+    write_hex(6 * CONSOLE_WIDTH, "RFLAGS", frame->rflags, " 0x");
+    write_hex(7 * CONSOLE_WIDTH, "RSP", frame->rsp, " 0x");
     if (frame->vector == 14)
-        write_hex(8 * CONSOLE_WIDTH, "CR2", cr2);
+        write_hex(8 * CONSOLE_WIDTH, "CR2", cr2, " 0x");
 
     for (unsigned int i = 0; i < 15; ++i)
-        write_hex((10 + i) * CONSOLE_WIDTH, labels[i], frame->gpr[i]);
+        write_hex((10 + i / 2) * CONSOLE_WIDTH + (i % 2) * (CONSOLE_WIDTH / 2),
+            labels[i], frame->gpr[i], " ");
     for (;;)
         __asm__ volatile ("cli; hlt");
 }

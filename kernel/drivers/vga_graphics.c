@@ -1,12 +1,16 @@
-#include "vga_graphics.h"
+#include "console.h"
 
-enum { WIDTH = 320, HEIGHT = 200, GLYPH_SIZE = 8 };
-static volatile unsigned char *const video = (volatile unsigned char *)0xa0000;
+enum {
+    WIDTH = VGA_GRAPHICS_WIDTH,
+    HEIGHT = VGA_GRAPHICS_HEIGHT,
+    GLYPH_SIZE = VGA_GLYPH_SIZE
+};
+static volatile unsigned char* const video = (volatile unsigned char*)0xa0000;
 /* boot.S copies the BIOS 8x8 font here before entering long mode. */
-static const unsigned char *const font = (const unsigned char *)0x6000;
+static const unsigned char* const font = (const unsigned char*)0x6000;
 
 static void rect(unsigned int x, unsigned int y, unsigned int width,
-                 unsigned int height, unsigned char color)
+    unsigned int height, unsigned char color)
 {
     if (x >= WIDTH || y >= HEIGHT)
         return;
@@ -20,11 +24,11 @@ static void rect(unsigned int x, unsigned int y, unsigned int width,
             video[(y + row) * WIDTH + x + col] = color;
 }
 
-static void draw_text(unsigned int x, unsigned int y, const char *text,
-                      unsigned int scale, unsigned char color)
+static void draw_text(unsigned int x, unsigned int y, const char* text,
+    unsigned int scale, unsigned char color)
 {
     while (*text) {
-        const unsigned char *glyph = font + ((unsigned char)*text++ & 0x7f) * GLYPH_SIZE;
+        const unsigned char* glyph = font + ((unsigned char)*text++ & 0x7f) * GLYPH_SIZE;
         for (unsigned int row = 0; row < GLYPH_SIZE; ++row)
             for (unsigned int col = 0; col < GLYPH_SIZE; ++col)
                 if (glyph[row] & (0x80 >> col))
@@ -45,28 +49,128 @@ void vga_graphics_splash(void)
         rect(64 + i * 12, 135, 12, 9, (unsigned char)i);
 }
 
-enum { COLUMNS = WIDTH / GLYPH_SIZE, CELL_COUNT = COLUMNS * (HEIGHT / GLYPH_SIZE) };
+enum { COLUMNS = CONSOLE_WIDTH, CELL_COUNT = COLUMNS * CONSOLE_HEIGHT };
 static unsigned short cells[CELL_COUNT];
 /* Zero means hidden, including before the shell starts. */
 static unsigned int cursor_slot;
 static unsigned int cursor_visible;
+/* Seven rows per glyph, five pixels packed into each row. */
+static const unsigned char terminal_font['z' - '0' + 1][7] = {
+    ['A' - '0'] = { 0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11 },
+    ['B' - '0'] = { 0x1e, 0x11, 0x11, 0x1e, 0x11, 0x11, 0x1e },
+    ['C' - '0'] = { 0x0e, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0e },
+    ['D' - '0'] = { 0x1e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1e },
+    ['E' - '0'] = { 0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x1f },
+    ['F' - '0'] = { 0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x10 },
+    ['G' - '0'] = { 0x0e, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0f },
+    ['H' - '0'] = { 0x11, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11 },
+    ['I' - '0'] = { 0x0e, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0e },
+    ['J' - '0'] = { 0x07, 0x02, 0x02, 0x02, 0x12, 0x12, 0x0c },
+    ['K' - '0'] = { 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 },
+    ['L' - '0'] = { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1f },
+    ['M' - '0'] = { 0x11, 0x1b, 0x15, 0x15, 0x11, 0x11, 0x11 },
+    ['N' - '0'] = { 0x11, 0x19, 0x19, 0x15, 0x13, 0x13, 0x11 },
+    ['O' - '0'] = { 0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e },
+    ['P' - '0'] = { 0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10 },
+    ['Q' - '0'] = { 0x0e, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0d },
+    ['R' - '0'] = { 0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11 },
+    ['S' - '0'] = { 0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e },
+    ['T' - '0'] = { 0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 },
+    ['U' - '0'] = { 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e },
+    ['V' - '0'] = { 0x11, 0x11, 0x11, 0x11, 0x11, 0x0a, 0x04 },
+    ['W' - '0'] = { 0x11, 0x11, 0x11, 0x15, 0x15, 0x1b, 0x11 },
+    ['X' - '0'] = { 0x11, 0x11, 0x0a, 0x04, 0x0a, 0x11, 0x11 },
+    ['Y' - '0'] = { 0x11, 0x11, 0x0a, 0x04, 0x04, 0x04, 0x04 },
+    ['Z' - '0'] = { 0x1f, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1f },
+    ['a' - '0'] = { 0x00, 0x00, 0x0e, 0x01, 0x0f, 0x11, 0x0f },
+    ['b' - '0'] = { 0x10, 0x10, 0x1e, 0x11, 0x11, 0x11, 0x1e },
+    ['c' - '0'] = { 0x00, 0x00, 0x0f, 0x10, 0x10, 0x10, 0x0f },
+    ['d' - '0'] = { 0x01, 0x01, 0x0f, 0x11, 0x11, 0x11, 0x0f },
+    ['e' - '0'] = { 0x00, 0x00, 0x0e, 0x11, 0x1f, 0x10, 0x0f },
+    ['f' - '0'] = { 0x06, 0x09, 0x09, 0x1c, 0x08, 0x08, 0x08 },
+    ['g' - '0'] = { 0x00, 0x00, 0x0f, 0x11, 0x11, 0x0f, 0x01 },
+    ['h' - '0'] = { 0x10, 0x10, 0x1e, 0x11, 0x11, 0x11, 0x11 },
+    ['i' - '0'] = { 0x04, 0x00, 0x0c, 0x04, 0x04, 0x04, 0x0e },
+    ['j' - '0'] = { 0x02, 0x00, 0x06, 0x02, 0x02, 0x02, 0x12 },
+    ['k' - '0'] = { 0x10, 0x10, 0x11, 0x12, 0x1c, 0x12, 0x11 },
+    ['l' - '0'] = { 0x0c, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0e },
+    ['m' - '0'] = { 0x00, 0x00, 0x1a, 0x15, 0x15, 0x15, 0x15 },
+    ['n' - '0'] = { 0x00, 0x00, 0x1e, 0x11, 0x11, 0x11, 0x11 },
+    ['o' - '0'] = { 0x00, 0x00, 0x0e, 0x11, 0x11, 0x11, 0x0e },
+    ['p' - '0'] = { 0x00, 0x00, 0x1e, 0x11, 0x11, 0x11, 0x1e },
+    ['q' - '0'] = { 0x00, 0x00, 0x0f, 0x11, 0x11, 0x0f, 0x01 },
+    ['r' - '0'] = { 0x00, 0x00, 0x16, 0x19, 0x10, 0x10, 0x10 },
+    ['s' - '0'] = { 0x00, 0x00, 0x0f, 0x10, 0x0e, 0x01, 0x1e },
+    ['t' - '0'] = { 0x08, 0x08, 0x1e, 0x08, 0x08, 0x09, 0x06 },
+    ['u' - '0'] = { 0x00, 0x00, 0x11, 0x11, 0x11, 0x11, 0x0f },
+    ['v' - '0'] = { 0x00, 0x00, 0x11, 0x11, 0x11, 0x0a, 0x04 },
+    ['w' - '0'] = { 0x00, 0x00, 0x11, 0x11, 0x15, 0x15, 0x0a },
+    ['x' - '0'] = { 0x00, 0x00, 0x11, 0x0a, 0x04, 0x0a, 0x11 },
+    ['y' - '0'] = { 0x00, 0x00, 0x11, 0x11, 0x11, 0x0f, 0x01 },
+    ['z' - '0'] = { 0x00, 0x00, 0x1f, 0x02, 0x04, 0x08, 0x1f },
+    ['0' - '0'] = { 0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e },
+    ['1' - '0'] = { 0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e },
+    ['2' - '0'] = { 0x0e, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1f },
+    ['3' - '0'] = { 0x1e, 0x01, 0x01, 0x06, 0x01, 0x01, 0x1e },
+    ['4' - '0'] = { 0x02, 0x06, 0x0a, 0x12, 0x1f, 0x02, 0x02 },
+    ['5' - '0'] = { 0x1f, 0x10, 0x10, 0x1e, 0x01, 0x01, 0x1e },
+    ['6' - '0'] = { 0x06, 0x08, 0x10, 0x1e, 0x11, 0x11, 0x0e },
+    ['7' - '0'] = { 0x1f, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 },
+    ['8' - '0'] = { 0x0e, 0x11, 0x11, 0x0e, 0x11, 0x11, 0x0e },
+    ['9' - '0'] = { 0x0e, 0x11, 0x11, 0x0f, 0x01, 0x02, 0x0c },
+};
+
+static unsigned char letter_row(unsigned char ch, unsigned int row)
+{
+    if (row == 7) {
+        if (ch == 'g' || ch == 'y')
+            return 0x38;
+        if (ch == 'p')
+            return 0x40;
+        if (ch == 'j')
+            return 0x18;
+        return 0;
+    }
+    return terminal_font[ch - '0'][row] << 2;
+}
+
+enum { ACCENT_ROWS = 2, GLYPH_HEIGHT = ACCENT_ROWS + GLYPH_SIZE };
+
 static unsigned char glyph_row(unsigned char ch, unsigned int row)
 {
     static const unsigned char accents[][2] = {
-        {0x0c, 0x18}, {0x30, 0x18}, {0x00, 0x32}, {0x10, 0x28}
+        { 0x08, 0x10 },{ 0x20, 0x10 },{ 0x14, 0x28 },{ 0x10, 0x28 }
     };
     static const char vowels[] = "aeiouAEIOU";
 
-    if (ch == 0x80 || ch == 0x81)
-        return row == 7 ? 0x18 : font[(ch == 0x80 ? 'c' : 'C') * 8 + row];
-    if (ch >= 0xf0 && ch <= 0xf3)
-        return row < 2 ? accents[ch - 0xf0][row] : 0;
-    if (ch >= 0x82 && ch < 0xaa) {
-        const unsigned int index = ch - 0x82;
-        if (row < 2)
-            return accents[index / 10][row];
-        return font[(unsigned int)vowels[index % 10] * 8 + row - 1];
+    if (row < ACCENT_ROWS) {
+        if (ch >= 0x82 && ch < 0xaa)
+            return accents[(ch - 0x82) / 10][row];
+        if (ch >= 0xf0 && ch <= 0xf3)
+            return accents[ch - 0xf0][row];
+        return 0;
     }
+
+    row -= ACCENT_ROWS;
+    if (ch >= 0xf0 && ch <= 0xf3)
+        return 0;
+    if (ch == 0x80 || ch == 0x81) {
+        const unsigned char base = ch == 0x80 ? 'c' : 'C';
+        if (row == 7)
+            return 0x18;
+        if (row == 6)
+            return letter_row(base, row) | 0x08;
+        return letter_row(base, row);
+    }
+    if (ch >= 0x82 && ch < 0xaa) {
+        ch = vowels[(ch - 0x82) % 10];
+        /* The accent takes the place of the dot on lowercase i. */
+        if (ch == 'i' && row == 0)
+            return 0;
+    }
+    if ((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') ||
+        (ch >= 'a' && ch <= 'z'))
+        return letter_row(ch, row);
     return font[(ch < 128 ? ch : '?') * 8 + row];
 }
 
@@ -74,12 +178,14 @@ static void render_cell(unsigned int cell, unsigned short value)
 {
     const unsigned char foreground = (value >> 8) & 15;
     const unsigned char background = (value >> 12) & 7;
-    const unsigned int offset = (cell / COLUMNS) * 8 * WIDTH + (cell % COLUMNS) * 8;
-    for (unsigned int y = 0; y < 8; ++y) {
+    const unsigned int offset = (cell / COLUMNS) * VGA_LINE_HEIGHT * WIDTH + (cell % COLUMNS) * 8;
+    for (unsigned int y = 0; y < GLYPH_HEIGHT; ++y) {
         const unsigned char bits = glyph_row(value, y);
         for (unsigned int x = 0; x < 8; ++x)
             video[offset + y * WIDTH + x] = (bits & (0x80 >> x)) ? foreground : background;
     }
+    for (unsigned int x = 0; x < GLYPH_SIZE; ++x)
+        video[offset + GLYPH_HEIGHT * WIDTH + x] = background;
 }
 
 static void redraw_cursor(void)
@@ -87,7 +193,7 @@ static void redraw_cursor(void)
     const unsigned int cell = cursor_slot - 1;
     render_cell(cell, cells[cell]);
     if (cursor_visible)
-        rect(cell % COLUMNS * 8, cell / COLUMNS * 8 + 7, 8, 1, 15);
+        rect(cell % COLUMNS * 8, cell / COLUMNS * VGA_LINE_HEIGHT + GLYPH_HEIGHT - 1, 8, 1, 15);
 }
 
 void vga_graphics_put(unsigned int cell, unsigned short value)
@@ -129,4 +235,6 @@ void vga_graphics_init(void)
 {
     cursor_slot = 0;
     cursor_visible = 0;
+    const unsigned int bottom = CONSOLE_HEIGHT * VGA_LINE_HEIGHT;
+    rect(0, bottom, WIDTH, HEIGHT - bottom, 0);
 }
