@@ -44,9 +44,10 @@ O shell compara o nome exatamente como aparece no `ls`. Na imagem de HD de teste
 | Comando | Resultado |
 |---|---|
 | `run eco.APP Ola mundo` | Mostra os argumentos separados por espaços. |
-| `run nome.APP` | Pede seu nome e exibe uma saudação depois de Enter. |
+| `run nome.APP` | Pede seu nome e exibe uma saudação depois de Enter. Pressione **Ctrl+C** durante a leitura para voltar ao shell. |
+| `run loop.APP` | Entra em loop. Pressione **Ctrl+C** para encerrar o programa e voltar ao shell. |
 | `run ola.APP` | Exibe uma mensagem, mostra o código de saída 0 e volta ao prompt. |
 | `run FALHA.APP` | Executa `ud2`, mostra o vetor 6 e volta ao prompt. |
 | `run INVALIDO.APP` | Recusa um cabeçalho inválido e volta ao prompt. |
 
-O código e as constantes ficam em uma página de leitura e execução. A pilha tem 4 KiB com uma página de guarda abaixo dela. A pilha tem execução desabilitada quando a CPU oferece NX. Ao encerrar o programa, o kernel libera as duas páginas e volta ao shell.
+O código e as constantes ficam em uma página de leitura e execução. A pilha tem 4 KiB com uma página de guarda abaixo dela. A pilha tem execução desabilitada quando a CPU oferece NX. Ao encerrar ou interromper o programa com **Ctrl+C**, o kernel libera as duas páginas e volta ao shell.

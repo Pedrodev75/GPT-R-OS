@@ -4,7 +4,7 @@
 #include "../fs/fat16.h"
 
 enum app_status {
-    APP_EXITED, APP_FAULTED, APP_INVALID, APP_READ_ERROR, APP_NO_MEMORY, APP_BAD_ARGS
+    APP_EXITED, APP_FAULTED, APP_INVALID, APP_READ_ERROR, APP_NO_MEMORY, APP_BAD_ARGS, APP_INTERRUPTED
 };
 
 struct app_result {
@@ -23,6 +23,8 @@ struct app_launch {
 };
 
 void app_init(void);
+void app_interrupt(unsigned long long cs);
+int app_interrupt_pending(void);
 struct app_result app_run(const struct fat16_volume *volume,
     const struct fat16_file *file, const struct app_launch *launch);
 void app_handle_exception(unsigned long long cs, unsigned long long vector,

@@ -336,7 +336,7 @@ static unsigned int read_app_line(void *context, unsigned char *buffer,
     for (;;) {
         shell_move_cursor(*output->row, output->col);
         const unsigned int key = shell_wait_key();
-        if (key == '\n')
+        if (key == '\n' || key == KEY_INTERRUPT)
             break;
         if (key == '\b' && length) {
             do {
@@ -426,6 +426,10 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
         break;
     case APP_READ_ERROR:
         shell_print_line(row, "Falha ao ler arquivo ou cadeia FAT16");
+        break;
+    case APP_INTERRUPTED:
+        shell_discard_input();
+        shell_print_line(row, "Programa interrompido (Ctrl+C)");
         break;
     case APP_BAD_ARGS:
         shell_print_line(row, "Argumentos invalidos");

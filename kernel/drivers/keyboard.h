@@ -8,7 +8,8 @@ enum {
     KEY_UP = 0x100,
     KEY_DOWN,
     KEY_LEFT,
-    KEY_RIGHT
+    KEY_RIGHT,
+    KEY_INTERRUPT
 };
 
 struct keyboard_state {
@@ -26,8 +27,5 @@ unsigned int keyboard_poll(struct keyboard_state *keyboard);
 
 /* Wait for any decoded event. */
 unsigned int keyboard_wait(struct keyboard_state *keyboard);
-
-/* Wait for a printable character, Enter or Backspace. */
-unsigned char keyboard_read_char(struct keyboard_state* keyboard);
 
 #endif

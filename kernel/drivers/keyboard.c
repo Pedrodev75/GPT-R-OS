@@ -1,4 +1,5 @@
 #include "keyboard.h"
+#include "../apps/app.h"
 
 /* PS/2 scan code set 1, using the BIOS controller's translation. */
 /* ABNT2 scan codes, translated by the PS/2 controller to set 1. */
@@ -43,20 +44,72 @@ static volatile unsigned char queue[QUEUE_MASK + 1];
 static volatile unsigned int head;
 static volatile unsigned int tail;
 
-static void receive_byte(unsigned char status)
+static unsigned int ctrl_keys, scan_pause;
+static int scan_extended, suppress_c;
+
+enum scan_action { QUEUE_SCAN, DROP_SCAN, INTERRUPT_APP };
+
+static enum scan_action scan_shortcut(unsigned char byte)
+{
+    if (scan_pause) {
+        --scan_pause;
+        return QUEUE_SCAN;
+    }
+    if (byte == 0xe1) {
+        scan_pause = 5;
+        scan_extended = 0;
+        return QUEUE_SCAN;
+    }
+    if (byte == 0xe0) {
+        scan_extended = 1;
+        return QUEUE_SCAN;
+    }
+    const int extended = scan_extended;
+    scan_extended = 0;
+    const unsigned int code = byte & 0x7f;
+    const int released = byte & 0x80;
+    if (code == 0x1d) {
+        const unsigned int mask = extended ? 2 : 1;
+        if (released)
+            ctrl_keys &= ~mask;
+        else
+            ctrl_keys |= mask;
+    }
+    if (extended || code != 0x2e)
+        return QUEUE_SCAN;
+    if (suppress_c) {
+        if (released)
+            suppress_c = 0;
+        return DROP_SCAN;
+    }
+    if (!released && ctrl_keys) {
+        suppress_c = 1;
+        return INTERRUPT_APP;
+    }
+    return QUEUE_SCAN;
+}
+
+static enum scan_action receive_byte(unsigned char status)
 {
     const unsigned char byte = read_port(0x60);
+    if (status & 0xe0)
+        return DROP_SCAN;
+    /* Recognize Ctrl+C even if a CPU-bound app has filled the input queue. */
+    const enum scan_action action = scan_shortcut(byte);
     const unsigned int next = (head + 1) & QUEUE_MASK;
-    if (!(status & 0xe0) && next != tail) {
+    if (action == QUEUE_SCAN && next != tail) {
         queue[head] = byte;
         head = next;
     }
+    return action;
 }
 
 int keyboard_irq_init(void)
 {
     head = 0;
     tail = 0;
+    ctrl_keys = scan_pause = 0;
+    scan_extended = suppress_c = 0;
 
     /* Remap the two 8259 PICs, then unmask IRQ0 and IRQ1. */
     write_port(0x21, 0xff);
@@ -81,12 +134,13 @@ int keyboard_irq_init(void)
     return status != 0xff && !(status & 1) && !(read_port(0x21) & 2);
 }
 
-void keyboard_irq_handler(void)
+void keyboard_irq_handler(unsigned long long cs)
 {
     const unsigned char status = read_port(0x64);
-    if (status & 1)
-        receive_byte(status);
+    const enum scan_action action = (status & 1) ? receive_byte(status) : DROP_SCAN;
     write_port(0x20, 0x20);
+    if (action == INTERRUPT_APP)
+        app_interrupt(cs);
 }
 
 unsigned int keyboard_poll(struct keyboard_state *keyboard)
@@ -178,24 +232,17 @@ unsigned int keyboard_poll(struct keyboard_state *keyboard)
 unsigned int keyboard_wait(struct keyboard_state *keyboard)
 {
     for (;;) {
+        if (app_interrupt_pending())
+            return KEY_INTERRUPT;
         const unsigned int key = keyboard_poll(keyboard);
         if (key)
             return key;
 
         __asm__ volatile ("cli" : : : "memory");
-        if (head == tail)
+        if (head == tail && !app_interrupt_pending())
             __asm__ volatile ("sti; hlt" : : : "memory");
         else
             __asm__ volatile ("sti" : : : "memory");
     }
 }
 
-
-unsigned char keyboard_read_char(struct keyboard_state *keyboard)
-{
-    for (;;) {
-        const unsigned int key = keyboard_wait(keyboard);
-        if (key <= 255 && key != KEY_ESCAPE)
-            return key;
-    }
-}

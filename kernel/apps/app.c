@@ -29,6 +29,7 @@ static unsigned char interrupt_stack[2 * PAGE_SIZE] __attribute__((aligned(16)))
 static unsigned long long directory[512] __attribute__((aligned(PAGE_SIZE)));
 static unsigned long long table[512] __attribute__((aligned(PAGE_SIZE)));
 static unsigned long long stack_page_flags;
+static volatile int interrupt_pending;
 
 static struct {
     int active;
@@ -63,6 +64,7 @@ void app_init(void)
     app_tss_descriptor[1] = base >> 32;
     __asm__ volatile ("ltr %w0" : : "r"((unsigned short)0x28) : "memory");
     running.active = 0;
+    interrupt_pending = 0;
     stack_page_flags = PRESENT | WRITABLE | USER | enable_nx();
 }
 
@@ -162,10 +164,12 @@ static struct app_result execute_image(void *image, void *stack, unsigned int si
 
     running.image_size = size;
     running.launch = launch;
+    interrupt_pending = 0;
     running.active = 1;
     app_enter(USER_IMAGE + entry, user_rsp);
 
     running.active = 0;
+    interrupt_pending = 0;
     pdpt[USER_PDPT_SLOT] = 0;
     pml4[0] &= ~(unsigned long long)USER;
     flush_tlb();
@@ -219,6 +223,27 @@ static int contains(unsigned long long address, unsigned long long length,
     return address >= start && length <= size && address - start <= size - length;
 }
 
+static _Noreturn void finish_interrupted(void)
+{
+    running.result = (struct app_result){ .status = APP_INTERRUPTED };
+    app_leave();
+}
+
+void app_interrupt(unsigned long long cs)
+{
+    if (!running.active)
+        return;
+    if ((cs & 3) == 3)
+        finish_interrupted();
+    /* An IRQ inside read wakes the keyboard wait before we unwind the syscall. */
+    interrupt_pending = 1;
+}
+
+int app_interrupt_pending(void)
+{
+    return interrupt_pending;
+}
+
 long long app_syscall(unsigned long long number, unsigned long long argument,
     unsigned long long length, unsigned long long cs)
 {
@@ -237,7 +262,12 @@ long long app_syscall(unsigned long long number, unsigned long long argument,
     if (number == 3) {
         if (!in_stack)
             return -1;
-        return launch->input(launch->context, (unsigned char *)argument, (unsigned int)length);
+        const unsigned int count =
+            launch->input(launch->context, (unsigned char *)argument, (unsigned int)length);
+        __asm__ volatile ("cli" : : : "memory");
+        if (interrupt_pending)
+            finish_interrupted();
+        return count;
     }
     if (!in_stack && !contains(argument, length, USER_IMAGE, running.image_size))
         return -1;

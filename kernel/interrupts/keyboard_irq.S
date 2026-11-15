@@ -1,7 +1,7 @@
 .intel_syntax noprefix
 .section .text
 .code64
-.macro irq_entry entry, handler
+.macro irq_entry entry, handler, frame=0
 .global \entry
 \entry:
     # Preserve the interrupted code's caller-saved registers.
@@ -18,6 +18,10 @@
     mov rbx, rsp
     and rsp, -16
     cld
+    .if \frame
+        # CS follows the ten saved registers and the interrupted RIP.
+        mov rdi, [rbx + 11 * 8]
+    .endif
     call \handler
     mov rsp, rbx
     pop rbx
@@ -33,7 +37,7 @@
     iretq
 .endm
 
-irq_entry keyboard_irq_entry, keyboard_irq_handler
+irq_entry keyboard_irq_entry, keyboard_irq_handler, 1
 irq_entry timer_irq_entry, timer_irq_handler
 
 .section .note.GNU-stack,"",@progbits

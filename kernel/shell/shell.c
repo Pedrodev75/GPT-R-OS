@@ -176,6 +176,40 @@ static void command_help(unsigned int *row, const unsigned char *argument)
     }
 }
 
+enum { HISTORY_LIMIT = 16 };
+
+static struct {
+    unsigned char entries[HISTORY_LIMIT][MAX_INPUT + 1];
+    unsigned int next, count;
+} history;
+
+static void remember_command(const unsigned char *line, unsigned int length)
+{
+    const unsigned int previous = (history.next + HISTORY_LIMIT - 1) % HISTORY_LIMIT;
+    const char *last = (const char *)history.entries[previous];
+    if (history.count && shell_equals(line, last))
+        return;
+    unsigned char *entry = history.entries[history.next];
+    for (unsigned int i = 0; i <= length; ++i)
+        entry[i] = line[i];
+    history.next = (history.next + 1) % HISTORY_LIMIT;
+    if (history.count < HISTORY_LIMIT)
+        ++history.count;
+}
+
+static unsigned int recall_command(unsigned int row, unsigned char *line,
+    unsigned int old_length, const unsigned char *source)
+{
+    unsigned int length = 0;
+    for (; source[length]; ++length) {
+        line[length] = source[length];
+        console_put(row * WIDTH + PROMPT_WIDTH + length, console_color | line[length]);
+    }
+    for (unsigned int i = length; i < old_length; ++i)
+        console_put(row * WIDTH + PROMPT_WIDTH + i, console_color | ' ');
+    return length;
+}
+
 static void execute(unsigned int *row, unsigned char *line, unsigned int length)
 {
     while (length && *line == ' ') {
@@ -187,6 +221,7 @@ static void execute(unsigned int *row, unsigned char *line, unsigned int length)
     line[length] = 0;
     if (!length)
         return;
+    remember_command(line, length);
 
     for (unsigned int i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
         const unsigned char *argument = argument_for(line, commands[i].name);
@@ -203,30 +238,52 @@ unsigned int shell_wait_key(void)
     return keyboard_wait(&keyboard);
 }
 
+void shell_discard_input(void)
+{
+    while (keyboard_poll(&keyboard)) {}
+    keyboard.accent = 0;
+}
+
 _Noreturn void shell_run(unsigned int row)
 {
     keyboard = (struct keyboard_state){0};
-    unsigned char line[MAX_INPUT + 1];
+    history.next = history.count = 0;
+    unsigned char line[MAX_INPUT + 1], draft[MAX_INPUT + 1];
     shell_memory_init();
 
     for (;;) {
-        unsigned int length = 0;
+        unsigned int length = 0, distance = 0;
         console_put(row * WIDTH, console_color | '>');
         for (;;) {
             const unsigned int col = PROMPT_WIDTH + length;
             shell_move_cursor(row, col < WIDTH ? col : WIDTH - 1);
-            const unsigned char ch = keyboard_read_char(&keyboard);
+            const unsigned int key = shell_wait_key();
 #ifdef GPT_R_GRAPHICS
             vga_graphics_cursor(WIDTH * HEIGHT);
 #endif
-            if (ch == '\n')
+            if (key == '\n')
                 break;
-            if (ch == '\b') {
+            if (key == KEY_UP || key == KEY_DOWN) {
+                if (key == KEY_UP && distance < history.count) {
+                    if (!distance) {
+                        for (unsigned int i = 0; i < length; ++i)
+                            draft[i] = line[i];
+                        draft[length] = 0;
+                    }
+                    ++distance;
+                } else if (key == KEY_DOWN && distance) {
+                    --distance;
+                } else {
+                    continue;
+                }
+                const unsigned int at = (history.next + HISTORY_LIMIT - distance) % HISTORY_LIMIT;
+                length = recall_command(row, line, length, distance ? history.entries[at] : draft);
+            } else if (key == '\b') {
                 if (length)
                     console_put(row * WIDTH + PROMPT_WIDTH + --length, console_color | ' ');
-            } else if (length < MAX_INPUT) {
-                line[length++] = ch;
-                console_put(row * WIDTH + col, console_color | ch);
+            } else if (key >= ' ' && key <= 255 && length < MAX_INPUT) {
+                line[length++] = key;
+                console_put(row * WIDTH + col, console_color | key);
             }
         }
         shell_next_row(&row);
