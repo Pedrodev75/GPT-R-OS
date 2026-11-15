@@ -14,5 +14,8 @@ void vga_graphics_put(unsigned int cell, unsigned short value);
 unsigned short vga_graphics_get(unsigned int cell);
 void vga_graphics_cursor(unsigned int cell);
 void vga_graphics_blink(void);
+struct keyboard_state;
+void vga_graphics_demo(struct keyboard_state *keyboard);
+void vga_graphics_restore_console(void);
 
 #endif
