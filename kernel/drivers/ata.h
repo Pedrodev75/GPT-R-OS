@@ -8,12 +8,14 @@ struct ata_disk {
     char model[41];
 };
 
-int ata_identify(struct ata_disk* disk);
-int ata_read_sector(const struct ata_disk* disk, unsigned int lba,
-    unsigned char data[ATA_SECTOR_SIZE]);
+enum ata_probe_result { ATA_MISSING, ATA_READY, ATA_PROBE_FAILED };
+enum ata_probe_result ata_probe(struct ata_disk *disk);
+int ata_identify(struct ata_disk *disk);
+int ata_read_sector(const struct ata_disk *disk, unsigned int lba,
+                    unsigned char data[ATA_SECTOR_SIZE]);
 
 /* Transfer one sector and wait for the device to flush its write cache. */
-int ata_write_sector(const struct ata_disk* disk, unsigned int lba,
-    const unsigned char data[ATA_SECTOR_SIZE]);
+int ata_write_sector(const struct ata_disk *disk, unsigned int lba,
+                     const unsigned char data[ATA_SECTOR_SIZE]);
 
 #endif

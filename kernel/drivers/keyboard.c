@@ -53,7 +53,7 @@ static void receive_byte(unsigned char status)
     }
 }
 
-void keyboard_irq_init(void)
+int keyboard_irq_init(void)
 {
     head = 0;
     tail = 0;
@@ -74,10 +74,11 @@ void keyboard_irq_init(void)
     /* The BIOS configured the PS/2 keyboard port and scan-code translation. */
     write_port(0x21, 0xfc);
     unsigned char status = read_port(0x64);
-    while (status & 1) {
+    for (unsigned int i = 0; i < 64 && status != 0xff && (status & 1); ++i) {
         receive_byte(status);
         status = read_port(0x64);
     }
+    return status != 0xff && !(status & 1) && !(read_port(0x21) & 2);
 }
 
 void keyboard_irq_handler(void)
@@ -88,7 +89,7 @@ void keyboard_irq_handler(void)
     write_port(0x20, 0x20);
 }
 
-unsigned int keyboard_poll(struct keyboard_state* keyboard)
+unsigned int keyboard_poll(struct keyboard_state *keyboard)
 {
     if (keyboard->pending) {
         const unsigned char ch = keyboard->pending;
@@ -174,7 +175,7 @@ unsigned int keyboard_poll(struct keyboard_state* keyboard)
     return 0;
 }
 
-unsigned char keyboard_read_char(struct keyboard_state* keyboard)
+unsigned char keyboard_read_char(struct keyboard_state *keyboard)
 {
     for (;;) {
         const unsigned int key = keyboard_poll(keyboard);

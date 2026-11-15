@@ -4,6 +4,7 @@
 #include "interrupts/idt.h"
 #include "drivers/timer.h"
 #include "drivers/keyboard.h"
+#include "fs/fat16.h"
 #include "shell/shell.h"
 
 volatile unsigned short console_color;
@@ -70,6 +71,47 @@ static void load_accents(void)
 
 #endif
 
+enum boot_result { BOOT_OK, BOOT_FAILED, BOOT_SKIP };
+
+static void boot_log(unsigned int *row, enum boot_result result, const char *message)
+{
+    static const char *const status_text[] = {"[  OK  ] ", "[FAILED] ", "[ SKIP ] "};
+    static const unsigned short status_color[] = {0x0a00, 0x0c00, 0x0e00};
+    const char *status = status_text[result];
+    unsigned int cell = (*row)++ * CONSOLE_WIDTH;
+    while (*status)
+        console_put(cell++, status_color[result] | (unsigned char)*status++);
+    while (*message)
+        console_put(cell++, console_color | (unsigned char)*message++);
+}
+
+static void log_storage(unsigned int *row)
+{
+    struct ata_disk disk;
+    struct fat16_volume volume;
+    const enum ata_probe_result ata = ata_probe(&disk);
+    if (ata == ATA_MISSING) {
+        boot_log(row, BOOT_SKIP, "ATA PIO - sem disco de dados");
+        boot_log(row, BOOT_SKIP, "Volume FAT16");
+    } else if (ata != ATA_READY) {
+        boot_log(row, BOOT_FAILED, "ATA PIO - falha ao identificar");
+        boot_log(row, BOOT_SKIP, "Volume FAT16");
+    } else {
+        boot_log(row, BOOT_OK, "ATA PIO - disco detectado");
+        boot_log(row, fat16_mount(&volume, &disk) ? BOOT_OK : BOOT_FAILED, "Volume FAT16");
+    }
+}
+
+static int timer_responds(void)
+{
+    for (unsigned int attempt = 0; attempt < 2000000; ++attempt) {
+        if (timer_ticks())
+            return 1;
+        __asm__ volatile ("pause");
+    }
+    return 0;
+}
+
 void kernel_main(void)
 {
     const char title[] = "GPT-R OS";
@@ -92,23 +134,42 @@ void kernel_main(void)
     for (unsigned int i = 0; title[i]; ++i)
         console_put(i, console_color | title[i]);
 
+    unsigned int row = 2;
+#ifdef GPT_R_GRAPHICS
+    boot_log(&row, BOOT_OK, "Video VBE 640x480");
+#else
+    boot_log(&row, BOOT_OK, "Video VGA em modo texto");
+#endif
+    boot_log(&row, BOOT_OK, "IDT carregada");
+
+    const int e820_ok = E820_MAP->status == E820_COMPLETE &&
+                        E820_MAP->count > 0 && E820_MAP->count <= E820_MAX_ENTRIES;
+    boot_log(&row, e820_ok ? BOOT_OK : BOOT_FAILED, "Mapa E820");
     pages_init(E820_MAP);
+    const int pages_ok = pages_managed_count() != 0;
+    boot_log(&row, pages_ok ? BOOT_OK : BOOT_FAILED, "Alocador de paginas");
     heap_init();
+    const enum boot_result heap = !pages_ok ? BOOT_SKIP :
+                                  heap_self_test() ? BOOT_OK : BOOT_FAILED;
+    boot_log(&row, heap, "Heap do kernel");
 #ifdef GPT_R_TEST_PAGE_FAULT
-    volatile unsigned char* page = page_alloc();
+    volatile unsigned char *page = page_alloc();
     if ((unsigned long long)page < 0x200000)
         __asm__ volatile ("ud2");
     page[0] = 0xaa;
     page[4095] = 0x55;
-    if (page[0] != 0xaa || page[4095] != 0x55 || !page_free((void*)page))
+    if (page[0] != 0xaa || page[4095] != 0x55 || !page_free((void *)page))
         __asm__ volatile ("ud2");
 
     /* PDPT entry 1 is absent, even with 1 GiB or more installed. */
     __asm__ volatile ("movb (%0), %%al" : : "r"(0x40000000ull) : "rax", "memory");
 #endif
     timer_init();
-    keyboard_irq_init();
+    const int keyboard_ok = keyboard_irq_init();
     __asm__ volatile ("sti" : : : "memory");
 
-    shell_run();
+    boot_log(&row, timer_responds() ? BOOT_OK : BOOT_FAILED, "Timer PIT");
+    boot_log(&row, keyboard_ok ? BOOT_OK : BOOT_FAILED, "Teclado PS/2 - IRQ1");
+    log_storage(&row);
+    shell_run(row + 1);
 }

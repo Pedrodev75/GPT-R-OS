@@ -1,7 +1,7 @@
 #ifndef GPT_R_KEYBOARD_H
 #define GPT_R_KEYBOARD_H
 
-void keyboard_irq_init(void);
+int keyboard_irq_init(void);
 
 enum {
     KEY_ESCAPE = 0x1b,
@@ -22,7 +22,7 @@ struct keyboard_state {
 };
 
 /* Return zero when no decoded event is ready. */
-unsigned int keyboard_poll(struct keyboard_state* keyboard);
+unsigned int keyboard_poll(struct keyboard_state *keyboard);
 
 /* Wait for a printable character, Enter or Backspace. */
 unsigned char keyboard_read_char(struct keyboard_state* keyboard);

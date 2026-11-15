@@ -53,7 +53,7 @@ static int wait_status(unsigned int mask, unsigned int wanted, int check_error)
     return 0;
 }
 
-int ata_identify(struct ata_disk *disk)
+enum ata_probe_result ata_probe(struct ata_disk *disk)
 {
     unsigned short words[256];
 
@@ -61,25 +61,31 @@ int ata_identify(struct ata_disk *disk)
     out_byte(CONTROL, 2);
     out_byte(DRIVE, 0xa0);
     settle();
+    unsigned char status = in_byte(CONTROL);
+    if (status == 0 || status == 0xff)
+        return ATA_MISSING;
     if (!wait_status(DRQ, 0, 0))
-        return 0;
+        return ATA_PROBE_FAILED;
     out_byte(COUNT, 0);
     out_byte(LBA_LOW, 0);
     out_byte(LBA_MID, 0);
     out_byte(LBA_HIGH, 0);
     out_byte(COMMAND, 0xec);
     settle();
+    status = in_byte(CONTROL);
+    if (status == 0 || status == 0xff)
+        return ATA_MISSING;
     if (!wait_status(DRQ, DRQ, 1) || in_byte(LBA_MID) || in_byte(LBA_HIGH))
-        return 0;
+        return ATA_PROBE_FAILED;
     for (unsigned int i = 0; i < 256; ++i)
         words[i] = in_word(DATA);
     settle();
     if (!wait_status(DRQ, 0, 1) || !(words[49] & (1 << 9)))
-        return 0;
+        return ATA_PROBE_FAILED;
 
     unsigned int sectors = words[60] | ((unsigned int)words[61] << 16);
     if (!sectors)
-        return 0;
+        return ATA_PROBE_FAILED;
     disk->sectors = sectors > LBA28_LIMIT ? LBA28_LIMIT : sectors;
     for (unsigned int i = 0; i < 20; ++i) {
         disk->model[2 * i] = words[27 + i] >> 8;
@@ -89,7 +95,12 @@ int ata_identify(struct ata_disk *disk)
     while (end && disk->model[end - 1] == ' ')
         --end;
     disk->model[end] = 0;
-    return 1;
+    return ATA_READY;
+}
+
+int ata_identify(struct ata_disk *disk)
+{
+    return ata_probe(disk) == ATA_READY;
 }
 
 static int begin_transfer(const struct ata_disk *disk, unsigned int lba,
