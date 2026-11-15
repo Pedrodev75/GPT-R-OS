@@ -27,17 +27,18 @@ static void show_uptime(void)
     unsigned long long value = seconds;
     unsigned int length = 0;
     unsigned int cell = COUNTER_CELL;
+    const unsigned short color = console_color;
 
     for (unsigned int i = 0; label[i]; ++i)
-        console_put(cell++, 0x0f00 | label[i]);
+        console_put(cell++, color | label[i]);
     do {
         digits[length++] = '0' + value % 10;
         value /= 10;
     } while (value && length < sizeof(digits));
     while (length)
-        console_put(cell++, 0x0f00 | digits[--length]);
-    console_put(cell++, 0x0f00 | ' ');
-    console_put(cell, 0x0f00 | 's');
+        console_put(cell++, color | digits[--length]);
+    console_put(cell++, color | ' ');
+    console_put(cell, color | 's');
 }
 
 void timer_init(void)

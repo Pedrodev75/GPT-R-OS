@@ -1,11 +1,12 @@
 #include "drivers/console.h"
 #include "memory/pages.h"
+#include "memory/heap.h"
 #include "interrupts/idt.h"
 #include "drivers/timer.h"
 #include "drivers/keyboard.h"
 #include "shell/shell.h"
 
-enum { TEXT_COLOR = 0x0f00 };
+volatile unsigned short console_color;
 
 #ifndef GPT_R_GRAPHICS
 
@@ -85,19 +86,21 @@ void kernel_main(void)
     vga_register(0x3d4, 0x0a, 14);
     vga_register(0x3d4, 0x0b, 15);
 #endif
+    console_color = 0x0f00;
     for (unsigned int i = 0; i < CONSOLE_WIDTH * CONSOLE_HEIGHT; ++i)
-        console_put(i, TEXT_COLOR | ' ');
+        console_put(i, console_color | ' ');
     for (unsigned int i = 0; title[i]; ++i)
-        console_put(i, TEXT_COLOR | title[i]);
+        console_put(i, console_color | title[i]);
 
     pages_init(E820_MAP);
+    heap_init();
 #ifdef GPT_R_TEST_PAGE_FAULT
-    volatile unsigned char *page = page_alloc();
+    volatile unsigned char* page = page_alloc();
     if ((unsigned long long)page < 0x200000)
         __asm__ volatile ("ud2");
     page[0] = 0xaa;
     page[4095] = 0x55;
-    if (page[0] != 0xaa || page[4095] != 0x55 || !page_free((void *)page))
+    if (page[0] != 0xaa || page[4095] != 0x55 || !page_free((void*)page))
         __asm__ volatile ("ud2");
 
     /* PDPT entry 1 is absent, even with 1 GiB or more installed. */

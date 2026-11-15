@@ -2,12 +2,12 @@
 #include "../drivers/console.h"
 #include "../memory/e820.h"
 #include "../memory/pages.h"
+#include "../memory/heap.h"
 #include "shell.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/timer.h"
 
 enum { WIDTH = CONSOLE_WIDTH, HEIGHT = CONSOLE_HEIGHT };
-static unsigned short text_color;
 
 static void out(unsigned short port, unsigned char value)
 {
@@ -38,7 +38,7 @@ static void move_cursor(unsigned int row, unsigned int col)
 static void clear_row(unsigned int row)
 {
     for (unsigned int col = 0; col < WIDTH; ++col)
-        console_put(row * WIDTH + col, text_color | ' ');
+        console_put(row * WIDTH + col, console_color | ' ');
 }
 
 enum { FIRST_ROW = 2, PROMPT_WIDTH = 2, MAX_INPUT = WIDTH - PROMPT_WIDTH };
@@ -62,7 +62,7 @@ static void print_line(unsigned int* row, const char* text)
             next_row(row);
             col = 0;
         }
-        console_put(*row * WIDTH + col++, text_color | (unsigned char)*text++);
+        console_put(*row * WIDTH + col++, console_color | (unsigned char)*text++);
     }
     next_row(row);
 }
@@ -262,9 +262,21 @@ static void change_color(unsigned int* row, const unsigned char* argument)
         return;
     }
 
-    text_color = (background << 12) | (foreground << 8);
+    if (foreground == background) {
+        print_line(row, "Frente e fundo precisam ser diferentes");
+        return;
+    }
+    const unsigned short color = (background << 12) | (foreground << 8);
+    unsigned long long flags;
+    /* The PIT redraws the header from IRQ0. Recolor it atomically. */
+    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
+    console_color = color;
+    for (unsigned int i = 0; i < FIRST_ROW * WIDTH; ++i)
+        console_put(i, color | (console_get(i) & 0xff));
+    if (flags & 0x200)
+        __asm__ volatile ("sti" : : : "memory");
     for (unsigned int i = FIRST_ROW * WIDTH; i < HEIGHT * WIDTH; ++i)
-        console_put(i, text_color | (console_get(i) & 0xff));
+        console_put(i, color | (console_get(i) & 0xff));
 }
 
 static void exhaust_pages(unsigned int* row)
@@ -320,6 +332,9 @@ static void crash_test(unsigned int* row, const unsigned char* type)
     else if (equals(type, "alloc")) {
         exhaust_pages(row);
     }
+    else if (equals(type, "heap")) {
+        print_line(row, heap_self_test() ? "crash heap: PASS" : "crash heap: FAIL");
+    }
     else if (equals(type, "hang")) {
         __asm__ volatile ("cli; 1: pause; jmp 1b" : : : "memory");
         __builtin_unreachable();
@@ -330,7 +345,7 @@ static void crash_test(unsigned int* row, const unsigned char* type)
         __builtin_unreachable();
     }
     else {
-        print_line(row, "Uso: crash <ud|div|pf|gp|int3|alloc|hang|triple>");
+        print_line(row, "Uso: crash <ud|div|pf|gp|int3|alloc|heap|hang|triple>");
     }
 }
 
@@ -368,21 +383,30 @@ static const unsigned char* skip_spaces(const unsigned char* text)
     return text;
 }
 
-static void show_sector(unsigned int* row, const unsigned char* argument)
+/* Returns -1 on overflow, 0 on invalid input, and 1 on success. */
+static int parse_decimal(const unsigned char* argument, unsigned int* number)
 {
-    unsigned int lba = 0;
+    unsigned int value = 0;
     const unsigned char* text = skip_spaces(argument);
     const unsigned char* start = text;
     while (*text >= '0' && *text <= '9') {
         const unsigned int digit = *text++ - '0';
-        if (lba > (0xffffffffu - digit) / 10) {
-            print_line(row, "LBA fora do intervalo");
-            return;
-        }
-        lba = lba * 10 + digit;
+        if (value > (0xffffffffu - digit) / 10)
+            return -1;
+        value = value * 10 + digit;
     }
-    if (text == start || *text) {
-        print_line(row, "Uso: sector <LBA decimal>");
+    if (text == start || *text)
+        return 0;
+    *number = value;
+    return 1;
+}
+
+static void show_sector(unsigned int* row, const unsigned char* argument)
+{
+    unsigned int lba;
+    const int parsed = parse_decimal(argument, &lba);
+    if (parsed != 1) {
+        print_line(row, parsed < 0 ? "LBA fora do intervalo" : "Uso: sector <LBA decimal>");
         return;
     }
 
@@ -456,9 +480,60 @@ static int same_filename(const unsigned char* input, const char* filename)
     return !*input && !*filename;
 }
 
+/* ABNT2 console glyph order, with Unicode values for UTF-8 on disk. */
+static const unsigned short disk_glyphs[] = {
+    0x00e7, 0x00c7,
+    0x00e1, 0x00e9, 0x00ed, 0x00f3, 0x00fa, 0x00c1, 0x00c9, 0x00cd, 0x00d3, 0x00da,
+    0x00e0, 0x00e8, 0x00ec, 0x00f2, 0x00f9, 0x00c0, 0x00c8, 0x00cc, 0x00d2, 0x00d9,
+    0x00e3, 0x1ebd, 0x0129, 0x00f5, 0x0169, 0x00c3, 0x1ebc, 0x0128, 0x00d5, 0x0168,
+    0x00e2, 0x00ea, 0x00ee, 0x00f4, 0x00fb, 0x00c2, 0x00ca, 0x00ce, 0x00d4, 0x00db
+};
+
+static const unsigned short accent_marks[] = { 0x00b4, 0x0060, 0x007e, 0x005e };
+
+static unsigned int glyph_codepoint(unsigned char glyph)
+{
+    if (glyph >= 0x80 && glyph < 0x80 + sizeof(disk_glyphs) / sizeof(disk_glyphs[0]))
+        return disk_glyphs[glyph - 0x80];
+    if (glyph >= 0xf0 && glyph <= 0xf3)
+        return accent_marks[glyph - 0xf0];
+    return glyph >= 32 && glyph <= 126 ? glyph : '?';
+}
+
+static unsigned char codepoint_glyph(unsigned int codepoint)
+{
+    if (codepoint >= 32 && codepoint <= 126)
+        return codepoint;
+    for (unsigned int i = 0; i < sizeof(disk_glyphs) / sizeof(disk_glyphs[0]); ++i)
+        if (codepoint == disk_glyphs[i])
+            return 0x80 + i;
+    return codepoint == 0x00b4 ? 0xf0 : '?';
+}
+
+static unsigned int encode_text(unsigned char* bytes, const unsigned char* text)
+{
+    unsigned int size = 0;
+    while (*text) {
+        const unsigned int cp = glyph_codepoint(*text++);
+        if (cp < 0x80) {
+            bytes[size++] = cp;
+        }
+        else if (cp < 0x800) {
+            bytes[size++] = 0xc0 | (cp >> 6);
+            bytes[size++] = 0x80 | (cp & 63);
+        }
+        else {
+            bytes[size++] = 0xe0 | (cp >> 12);
+            bytes[size++] = 0x80 | ((cp >> 6) & 63);
+            bytes[size++] = 0x80 | (cp & 63);
+        }
+    }
+    return size;
+}
+
 struct cat_output {
     unsigned int* row;
-    unsigned int col;
+    unsigned int col, codepoint, continuation, minimum;
 };
 
 static void cat_byte(struct cat_output* output, unsigned char ch)
@@ -467,7 +542,7 @@ static void cat_byte(struct cat_output* output, unsigned char ch)
         next_row(output->row);
         output->col = 0;
     }
-    console_put(*output->row * WIDTH + output->col++, text_color | ch);
+    console_put(*output->row * WIDTH + output->col++, console_color | ch);
 }
 
 static void cat_chunk(void* context, const unsigned char* data, unsigned int size)
@@ -475,7 +550,34 @@ static void cat_chunk(void* context, const unsigned char* data, unsigned int siz
     struct cat_output* output = context;
     for (unsigned int i = 0; i < size; ++i) {
         const unsigned char ch = data[i];
-        if (ch == '\n') {
+        if (output->continuation) {
+            if ((ch & 0xc0) == 0x80) {
+                output->codepoint = (output->codepoint << 6) | (ch & 63);
+                if (!--output->continuation) {
+                    unsigned int cp = output->codepoint;
+                    cat_byte(output, cp >= output->minimum ? codepoint_glyph(cp) : '?');
+                }
+                continue;
+            }
+            output->continuation = 0;
+            cat_byte(output, '?');
+        }
+        if (ch >= 0xc2 && ch <= 0xdf) {
+            output->continuation = 1;
+            output->minimum = 0x80;
+            output->codepoint = ch & 31;
+        }
+        else if (ch >= 0xe0 && ch <= 0xef) {
+            output->continuation = 2;
+            output->minimum = 0x800;
+            output->codepoint = ch & 15;
+        }
+        else if (ch >= 0xf0 && ch <= 0xf4) {
+            output->continuation = 3;
+            output->minimum = 0x10000;
+            output->codepoint = ch & 7;
+        }
+        else if (ch == '\n') {
             next_row(output->row);
             output->col = 0;
         }
@@ -510,8 +612,10 @@ static void cat_file(unsigned int* row, const unsigned char* argument)
     while ((result = fat16_next(&volume, &dir, &file)) > 0) {
         if (!same_filename(name, file.name))
             continue;
-        struct cat_output output = { row, 0 };
+        struct cat_output output = { .row = row };
         const int read_ok = fat16_read(&volume, &file, cat_chunk, &output);
+        if (output.continuation)
+            cat_byte(&output, '?');
         if (output.col)
             next_row(row);
         if (!read_ok)
@@ -541,14 +645,8 @@ static void edit_file(unsigned int* row, const unsigned char* argument, int remo
         print_line(row, remove ? "Uso: rm <arquivo>" : "Uso: write <arquivo> <texto>");
         return;
     }
-    unsigned int length = 0;
-    while (content[length]) {
-        if (content[length] < 32 || content[length] > 126) {
-            print_line(row, "write: use texto ASCII");
-            return;
-        }
-        ++length;
-    }
+    unsigned char data[MAX_INPUT * 3];
+    const unsigned int length = remove ? 0 : encode_text(data, content);
 
     struct ata_disk disk;
     struct fat16_volume volume;
@@ -556,11 +654,55 @@ static void edit_file(unsigned int* row, const unsigned char* argument, int remo
         return;
     const enum fat16_edit_result result = remove ?
         fat16_remove(&volume, name, end - name) :
-        fat16_write(&volume, name, end - name, content, length);
+        fat16_write(&volume, name, end - name, data, length);
     if (result == FAT16_EDIT_OK)
         print_line(row, remove ? "Arquivo removido" : "Arquivo salvo");
     else
         print_line(row, errors[result]);
+}
+
+enum { SHELL_HEAP_SLOTS = 32 };
+static void* shell_blocks[SHELL_HEAP_SLOTS];
+
+static void allocate_block(unsigned int* row, const unsigned char* argument)
+{
+    unsigned int bytes;
+    if (parse_decimal(argument, &bytes) != 1 || !bytes) {
+        print_line(row, "Uso: kmalloc <bytes em decimal>");
+        return;
+    }
+    for (unsigned int i = 0; i < SHELL_HEAP_SLOTS; ++i) {
+        if (shell_blocks[i])
+            continue;
+        void* block = kmalloc(bytes);
+        if (!block) {
+            print_line(row, "kmalloc: sem espaco para esse bloco");
+            return;
+        }
+        shell_blocks[i] = block;
+        show_address(row, (unsigned long long)block);
+        return;
+    }
+    print_line(row, "kmalloc: limite de 32 blocos ativos no shell");
+}
+
+static void free_block(unsigned int* row, const unsigned char* argument)
+{
+    unsigned long long address;
+    if (!parse_address(argument, &address)) {
+        print_line(row, "Uso: kfree <endereco hexadecimal>");
+        return;
+    }
+    for (unsigned int i = 0; i < SHELL_HEAP_SLOTS; ++i) {
+        void* block = shell_blocks[i];
+        if ((unsigned long long)block != address || !block)
+            continue;
+        shell_blocks[i] = 0;
+        kfree(block);
+        print_line(row, "Bloco liberado");
+        return;
+    }
+    print_line(row, "kfree: bloco ativo nao encontrado no shell");
 }
 
 static void execute(unsigned int* row, unsigned char* line, unsigned int length
@@ -585,6 +727,8 @@ static void execute(unsigned int* row, unsigned char* line, unsigned int length
         print_line(row, "uptime   Mostra o tempo ligado");
         print_line(row, "mem      Mostra o mapa e o uso da memoria");
         print_line(row, "memtest  Testa uma pagina de 4 KiB");
+        print_line(row, "kmalloc <bytes>    Aloca um bloco do heap");
+        print_line(row, "kfree <endereco>   Libera um bloco do heap");
         print_line(row, "peek     Le 16 bytes de um endereco hexadecimal");
         print_line(row, "reboot   Reinicia o sistema");
         print_line(row, "diskinfo Mostra o disco ATA");
@@ -595,6 +739,7 @@ static void execute(unsigned int* row, unsigned char* line, unsigned int length
         print_line(row, "rm       Remove um arquivo");
         print_line(row, "color    Muda as cores do terminal");
         print_line(row, "crash    Executa testes de erro e de limite");
+        print_line(row, "crash heap   Testa o alocador do kernel");
 #ifdef GPT_R_GRAPHICS
         print_line(row, "demo     Abre a demonstracao VGA");
     }
@@ -618,6 +763,12 @@ static void execute(unsigned int* row, unsigned char* line, unsigned int length
     }
     else if (equals(line, "memtest")) {
         test_memory(row);
+    }
+    else if ((argument = argument_for(line, "kmalloc"))) {
+        allocate_block(row, argument);
+    }
+    else if ((argument = argument_for(line, "kfree"))) {
+        free_block(row, argument);
     }
     else if ((argument = argument_for(line, "peek"))) {
         peek(row, argument);
@@ -662,11 +813,12 @@ _Noreturn void shell_run(void)
     struct keyboard_state keyboard = { 0 };
     unsigned char line[MAX_INPUT + 1];
     unsigned int row = FIRST_ROW;
-    text_color = 0x0f00;
+    for (unsigned int i = 0; i < SHELL_HEAP_SLOTS; ++i)
+        shell_blocks[i] = 0;
 
     for (;;) {
         unsigned int length = 0;
-        console_put(row * WIDTH, text_color | '>');
+        console_put(row * WIDTH, console_color | '>');
         for (;;) {
             const unsigned int col = PROMPT_WIDTH + length;
             move_cursor(row, col < WIDTH ? col : WIDTH - 1);
@@ -678,11 +830,11 @@ _Noreturn void shell_run(void)
                 break;
             if (ch == '\b') {
                 if (length)
-                    console_put(row * WIDTH + PROMPT_WIDTH + --length, text_color | ' ');
+                    console_put(row * WIDTH + PROMPT_WIDTH + --length, console_color | ' ');
             }
             else if (length < MAX_INPUT) {
                 line[length++] = ch;
-                console_put(row * WIDTH + col, text_color | ch);
+                console_put(row * WIDTH + col, console_color | ch);
             }
         }
         next_row(&row);

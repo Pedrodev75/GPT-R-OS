@@ -1,6 +1,8 @@
 #ifndef GPT_R_CONSOLE_H
 #define GPT_R_CONSOLE_H
 
+extern volatile unsigned short console_color;
+
 #ifdef GPT_R_GRAPHICS
 #include "vga_graphics.h"
 enum {
