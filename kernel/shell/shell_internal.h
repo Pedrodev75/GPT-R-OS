@@ -8,6 +8,7 @@ enum {
     FIRST_ROW = 2, PROMPT_WIDTH = 2, MAX_INPUT = WIDTH - PROMPT_WIDTH
 };
 
+unsigned int shell_wait_key(void);
 void shell_clear_row(unsigned int row);
 void shell_next_row(unsigned int *row);
 void shell_print_line(unsigned int *row, const char *text);

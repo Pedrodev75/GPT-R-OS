@@ -73,7 +73,7 @@ struct image_reader {
     unsigned int size;
 };
 
-static void collect_image(void *context, const unsigned char *data, unsigned int size)
+static int collect_image(void *context, const unsigned char *data, unsigned int size)
 {
     struct image_reader *reader = context;
     for (unsigned int i = 0; i < size; ++i) {
@@ -83,6 +83,7 @@ static void collect_image(void *context, const unsigned char *data, unsigned int
         else if (at < HEADER_SIZE + PAGE_SIZE)
             reader->image[at - HEADER_SIZE] = data[i];
     }
+    return 1;
 }
 
 static unsigned int read_u32(const unsigned char *p)
@@ -164,7 +165,7 @@ struct app_result app_run(const struct fat16_volume *volume,
     for (unsigned int i = 0; i < PAGE_SIZE; ++i)
         image[i] = 0;
     struct image_reader reader = { .image = image };
-    const int read_ok = fat16_read(volume, file, collect_image, &reader);
+    const int read_ok = fat16_read(volume, file, collect_image, &reader) == FAT16_READ_OK;
     unsigned int entry;
     enum app_status failure = APP_READ_ERROR;
     if (read_ok) {

@@ -34,11 +34,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Pack-App.ps1 -Messag
 
 O script já contém o código equivalente ao exemplo em `apps/OLA.S`. Sem `-Message`, gera a mensagem `Ola, GPT-R OS!`. Para empacotar outro código x86-64 que você já montou como binário plano, passe `-InputPath programa.bin` e, se necessário, `-EntryOffset`.
 
-A imagem de HD de teste contém os seguintes arquivos:
+O shell compara o nome exatamente como aparece no `ls`. Na imagem de HD de teste, use `ola.APP` com o nome em minúsculas e a extensão em maiúsculas.
 
 | Comando | Resultado |
 |---|---|
-| `run OLA.APP` | Exibe uma mensagem, mostra o código de saída 0 e volta ao prompt. |
+| `run ola.APP` | Exibe uma mensagem, mostra o código de saída 0 e volta ao prompt. |
 | `run FALHA.APP` | Executa `ud2`, mostra o vetor 6 e volta ao prompt. |
 | `run INVALIDO.APP` | Recusa um cabeçalho inválido e volta ao prompt. |
 

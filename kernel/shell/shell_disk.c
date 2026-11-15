@@ -1,4 +1,5 @@
 #include "../apps/app.h"
+#include "../drivers/keyboard.h"
 #include "shell_internal.h"
 #include "../fs/fat16.h"
 
@@ -19,6 +20,19 @@ void shell_diskinfo(unsigned int *row, const unsigned char *argument)
     shell_print_line(row, disk.model);
     shell_print_number(row, "Setores acessiveis: ", disk.sectors, " de 512 bytes");
     shell_print_number(row, "Capacidade acessivel: ", (unsigned long long)disk.sectors * 512, " bytes");
+    struct fat16_volume volume;
+    if (!fat16_mount(&volume, &disk)) {
+        shell_print_line(row, "Volume FAT16 indisponivel");
+        return;
+    }
+    unsigned int total, free;
+    if (!fat16_space(&volume, &total, &free)) {
+        shell_print_line(row, "Falha ao ler tabela FAT16");
+        return;
+    }
+    const unsigned long long cluster_bytes = volume.sectors_per_cluster * 512ull;
+    shell_print_number(row, "FAT16 total: ", total * cluster_bytes, " bytes");
+    shell_print_number(row, "FAT16 livre: ", free * cluster_bytes, " bytes");
 }
 
 void shell_sector(unsigned int *row, const unsigned char *argument)
@@ -57,6 +71,34 @@ static int open_volume(unsigned int *row, struct ata_disk *disk,
     return 0;
 }
 
+static void decimal_field(char *end, unsigned int value, unsigned int width, char fill)
+{
+    do {
+        *--end = '0' + value % 10;
+        value /= 10;
+    } while (--width && value);
+    while (width) {
+        *--end = fill;
+        --width;
+    }
+}
+
+static void list_file(unsigned int *row, const struct fat16_file *file)
+{
+    char line[] = "                           --/--/----";
+    for (unsigned int i = 0; file->name[i]; ++i)
+        line[i] = file->name[i];
+    decimal_field(line + 24, file->size, 10, ' ');
+    const unsigned int day = file->modified_date & 31;
+    const unsigned int month = (file->modified_date >> 5) & 15;
+    if (day && month && month <= 12) {
+        decimal_field(line + 29, day, 2, '0');
+        decimal_field(line + 32, month, 2, '0');
+        decimal_field(line + 37, 1980 + (file->modified_date >> 9), 4, '0');
+    }
+    shell_print_line(row, line);
+}
+
 void shell_ls(unsigned int *row, const unsigned char *argument)
 {
     (void)argument;
@@ -70,35 +112,15 @@ void shell_ls(unsigned int *row, const unsigned char *argument)
     struct fat16_file file;
     int result, found = 0;
     while ((result = fat16_next(&volume, &dir, &file)) > 0) {
-        char label[14];
-        unsigned int i = 0;
-        while (file.name[i]) {
-            label[i] = file.name[i];
-            ++i;
-        }
-        label[i++] = ' ';
-        label[i] = 0;
-        shell_print_number(row, label, file.size, " bytes");
+        if (!found)
+            shell_print_line(row, "Nome               Bytes   Modificado");
+        list_file(row, &file);
         found = 1;
     }
     if (result < 0)
         shell_print_line(row, "Falha ao ler diretorio");
     else if (!found)
         shell_print_line(row, "Diretorio raiz vazio");
-}
-
-static unsigned char upper_ascii(unsigned char ch)
-{
-    return ch >= 'a' && ch <= 'z' ? ch - 'a' + 'A' : ch;
-}
-
-static int same_filename(const unsigned char *input, const char *filename)
-{
-    while (*input && upper_ascii(*input) == upper_ascii(*filename)) {
-        ++input;
-        ++filename;
-    }
-    return !*input && !*filename;
 }
 
 /* ABNT2 console glyph order, with Unicode values for UTF-8 on disk. */
@@ -153,21 +175,55 @@ static unsigned int encode_text(unsigned char *bytes, const unsigned char *text)
 struct text_output {
     unsigned int *row;
     unsigned int col, codepoint, continuation, minimum;
+    unsigned int lines_left;
+    int paged, stopped;
 };
+
+static int page_ready(struct text_output *output)
+{
+    if (output->stopped)
+        return 0;
+    if (!output->paged || output->lines_left)
+        return 1;
+
+    static const char prompt[] = "Espaco: pagina | Enter: linha | Esc: sair";
+    for (unsigned int i = 0; prompt[i] && i < WIDTH; ++i)
+        console_put(*output->row * WIDTH + i, console_color | (unsigned char)prompt[i]);
+
+    unsigned int key;
+    do {
+        key = shell_wait_key();
+    } while (key != ' ' && key != '\n' && key != KEY_ESCAPE);
+    shell_clear_row(*output->row);
+    if (key == KEY_ESCAPE) {
+        output->stopped = 1;
+        return 0;
+    }
+    output->lines_left = key == ' ' ? HEIGHT - FIRST_ROW - 1 : 1;
+    return 1;
+}
+
+static void text_next_row(struct text_output *output)
+{
+    shell_next_row(output->row);
+    output->col = 0;
+    if (output->paged)
+        --output->lines_left;
+}
 
 static void text_byte(struct text_output *output, unsigned char ch)
 {
-    if (output->col == WIDTH) {
-        shell_next_row(output->row);
-        output->col = 0;
-    }
+    if (output->col == WIDTH)
+        text_next_row(output);
+    if (!page_ready(output))
+        return;
     console_put(*output->row * WIDTH + output->col++, console_color | ch);
 }
 
 static void text_chunk(void *context, const unsigned char *data, unsigned int size)
 {
     struct text_output *output = context;
-    for (unsigned int i = 0; i < size; ++i) {
+    for (unsigned int i = 0; i < size && !output->stopped; ++i) {
         const unsigned char ch = data[i];
         if (output->continuation) {
             if ((ch & 0xc0) == 0x80) {
@@ -194,8 +250,8 @@ static void text_chunk(void *context, const unsigned char *data, unsigned int si
             output->minimum = 0x10000;
             output->codepoint = ch & 7;
         } else if (ch == '\n') {
-            shell_next_row(output->row);
-            output->col = 0;
+            if (page_ready(output))
+                text_next_row(output);
         } else if (ch == '\t') {
             const unsigned int spaces = 4 - output->col % 4;
             for (unsigned int j = 0; j < spaces; ++j)
@@ -204,6 +260,13 @@ static void text_chunk(void *context, const unsigned char *data, unsigned int si
             text_byte(output, ch >= 32 && ch <= 126 ? ch : '?');
         }
     }
+}
+
+static int cat_chunk(void *context, const unsigned char *data, unsigned int size)
+{
+    struct text_output *output = context;
+    text_chunk(output, data, size);
+    return !output->stopped;
 }
 
 static void finish_text(struct text_output *output)
@@ -221,7 +284,7 @@ static int find_file(unsigned int *row, const struct fat16_volume *volume,
     dir.index = 0;
     int result;
     while ((result = fat16_next(volume, &dir, file)) > 0)
-        if (same_filename(name, file->name))
+        if (shell_equals(name, file->name))
             return 1;
     shell_print_line(row, result < 0 ? "Falha ao ler diretorio" : "Arquivo nao encontrado");
     return 0;
@@ -241,10 +304,13 @@ void shell_cat(unsigned int *row, const unsigned char *argument)
     if (!open_volume(row, &disk, &volume) || !find_file(row, &volume, name, &file))
         return;
 
-    struct text_output output = { .row = row };
-    const int read_ok = fat16_read(&volume, &file, text_chunk, &output);
-    finish_text(&output);
-    if (!read_ok)
+    struct text_output output = {
+        .row = row, .lines_left = HEIGHT - FIRST_ROW - 1, .paged = 1
+    };
+    const enum fat16_read_result result = fat16_read(&volume, &file, cat_chunk, &output);
+    if (result != FAT16_READ_STOPPED)
+        finish_text(&output);
+    if (result == FAT16_READ_ERROR)
         shell_print_line(row, "Falha ao ler arquivo ou cadeia FAT16");
 }
 
@@ -296,7 +362,9 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
 static void edit_file(unsigned int *row, const unsigned char *argument, int remove)
 {
     static const char *const errors[] = {
-        [FAT16_EDIT_NAME] = "Nome 8.3 invalido",
+        [FAT16_EDIT_NAME] = "Use nome 8.3 sem misturar a caixa em cada parte",
+        [FAT16_EDIT_TEXT_EXTENSION] = "Use .txt em minusculas",
+        [FAT16_EDIT_CASE] = "Ja existe um nome com outra capitalizacao",
         [FAT16_EDIT_SIZE] = "Texto maior que um setor",
         [FAT16_EDIT_MISSING] = "Arquivo nao encontrado",
         [FAT16_EDIT_PROTECTED] = "Entrada protegida ou com nome longo",

@@ -175,11 +175,11 @@ unsigned int keyboard_poll(struct keyboard_state *keyboard)
     return 0;
 }
 
-unsigned char keyboard_read_char(struct keyboard_state *keyboard)
+unsigned int keyboard_wait(struct keyboard_state *keyboard)
 {
     for (;;) {
         const unsigned int key = keyboard_poll(keyboard);
-        if (key >= 1 && key <= 255 && key != KEY_ESCAPE)
+        if (key)
             return key;
 
         __asm__ volatile ("cli" : : : "memory");
@@ -187,5 +187,15 @@ unsigned char keyboard_read_char(struct keyboard_state *keyboard)
             __asm__ volatile ("sti; hlt" : : : "memory");
         else
             __asm__ volatile ("sti" : : : "memory");
+    }
+}
+
+
+unsigned char keyboard_read_char(struct keyboard_state *keyboard)
+{
+    for (;;) {
+        const unsigned int key = keyboard_wait(keyboard);
+        if (key <= 255 && key != KEY_ESCAPE)
+            return key;
     }
 }

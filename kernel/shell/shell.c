@@ -145,7 +145,7 @@ static const struct command {
     {"diskinfo", "Mostra o disco ATA", shell_diskinfo, 0},
     {"sector", "Mostra 16 bytes de um setor", shell_sector, 1},
     {"ls", "Lista arquivos FAT16", shell_ls, 0},
-    {"cat", "Mostra o texto de um arquivo", shell_cat, 1},
+    {"cat", "Le texto com paginacao", shell_cat, 1},
     {"run", "Executa um programa .APP", shell_run_app, 1},
     {"write", "Cria ou sobrescreve um arquivo", shell_write, 1},
     {"rm", "Remove um arquivo", shell_rm, 1},
@@ -196,6 +196,11 @@ static void execute(unsigned int *row, unsigned char *line, unsigned int length)
         }
     }
     shell_print_line(row, "Comando desconhecido");
+}
+
+unsigned int shell_wait_key(void)
+{
+    return keyboard_wait(&keyboard);
 }
 
 _Noreturn void shell_run(unsigned int row)

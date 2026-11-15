@@ -24,6 +24,9 @@ struct keyboard_state {
 /* Return zero when no decoded event is ready. */
 unsigned int keyboard_poll(struct keyboard_state *keyboard);
 
+/* Wait for any decoded event. */
+unsigned int keyboard_wait(struct keyboard_state *keyboard);
+
 /* Wait for a printable character, Enter or Backspace. */
 unsigned char keyboard_read_char(struct keyboard_state* keyboard);
 

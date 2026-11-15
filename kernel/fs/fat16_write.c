@@ -26,36 +26,45 @@ static void put32(unsigned char *p, unsigned int value)
     put16(p + 2, value >> 16);
 }
 
-static int encode_name(unsigned char name[11], const unsigned char *text,
-                       unsigned int length)
+struct short_name {
+    unsigned char alias[11];
+    unsigned int lower, upper;
+};
+
+static int encode_name(struct short_name *name, const unsigned char *text,
+    unsigned int length)
 {
     for (unsigned int i = 0; i < 11; ++i)
-        name[i] = ' ';
-    unsigned int position = 0;
-    int extension = 0;
+        name->alias[i] = ' ';
+    name->lower = name->upper = 0;
+    unsigned int position = 0, part = FAT16_LOWER_BASE;
     if (!length)
         return 0;
     for (unsigned int i = 0; i < length; ++i) {
         unsigned char ch = text[i];
-        if (ch == '.' && !extension && position) {
+        if (ch == '.' && part == FAT16_LOWER_BASE && position) {
             position = 8;
-            extension = 1;
+            part = FAT16_LOWER_EXTENSION;
             continue;
         }
-        if (ch >= 'a' && ch <= 'z')
+        if (ch >= 'a' && ch <= 'z') {
+            name->lower |= part;
             ch -= 'a' - 'A';
-        if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
-              ch == '_' || ch == '-'))
+        } else if (ch >= 'A' && ch <= 'Z') {
+            name->upper |= part;
+        } else if (!((ch >= '0' && ch <= '9') || ch == '_' || ch == '-')) {
             return 0;
-        if (position == (extension ? 11u : 8u))
+        }
+        if (position == (part == FAT16_LOWER_EXTENSION ? 11u : 8u))
             return 0;
-        name[position++] = ch;
+        name->alias[position++] = ch;
     }
-    return !extension || position > 8;
+    return (part == FAT16_LOWER_BASE || position > 8) &&
+        !(name->lower & name->upper);
 }
 
 static enum fat16_edit_result find_entry(const struct fat16_volume *vol,
-                                         const unsigned char name[11],
+                                         const struct short_name *name,
                                          struct edit_entry *entry)
 {
     unsigned char sector[512];
@@ -81,9 +90,11 @@ static enum fat16_edit_result find_entry(const struct fat16_volume *vol,
             continue;
         }
         unsigned int match = 0;
-        while (match < 11 && slot[match] == name[match])
+        while (match < 11 && slot[match] == name->alias[match])
             ++match;
         if (match == 11) {
+            if (((slot[12] ^ name->lower) & (name->lower | name->upper)) != 0)
+                return FAT16_EDIT_CASE;
             if (long_name || (slot[11] & 0x19))
                 return FAT16_EDIT_PROTECTED;
             entry->exists = 1;
@@ -181,7 +192,7 @@ static int release_chain(const struct fat16_volume *vol, unsigned int cluster)
 
 static int update_directory(const struct fat16_volume *vol,
                             const struct edit_entry *entry,
-                            const unsigned char name[11], unsigned int cluster,
+                            const struct short_name *name, unsigned int cluster,
                             unsigned int length)
 {
     unsigned char sector[512];
@@ -208,7 +219,8 @@ static int update_directory(const struct fat16_volume *vol,
         }
         if (!entry->exists) {
             for (unsigned int i = 0; i < 32; ++i)
-                slot[i] = i < 11 ? name[i] : 0;
+                slot[i] = i < 11 ? name->alias[i] : 0;
+            slot[12] = name->lower;
             /* Jan 1, 1980 is a valid default without an RTC driver. */
             put16(slot + 16, 0x21);
             put16(slot + 18, 0x21);
@@ -225,16 +237,19 @@ enum fat16_edit_result fat16_write(const struct fat16_volume *vol,
                                   const unsigned char *text_name, unsigned int name_size,
                                   const unsigned char *text, unsigned int length)
 {
-    unsigned char name[11];
-    if (!encode_name(name, text_name, name_size))
+    struct short_name name;
+    if (!encode_name(&name, text_name, name_size))
         return FAT16_EDIT_NAME;
     if (length > 512)
         return FAT16_EDIT_SIZE;
 
     struct edit_entry entry;
-    enum fat16_edit_result result = find_entry(vol, name, &entry);
+    enum fat16_edit_result result = find_entry(vol, &name, &entry);
     if (result != FAT16_EDIT_OK)
         return result;
+    if (!entry.exists && (name.upper & FAT16_LOWER_EXTENSION) &&
+        name.alias[8] == 'T' && name.alias[9] == 'X' && name.alias[10] == 'T')
+        return FAT16_EDIT_TEXT_EXTENSION;
     if (entry.index == vol->root_entries)
         return FAT16_EDIT_FULL;
     if (entry.exists && !valid_chain(vol, &entry))
@@ -256,7 +271,7 @@ enum fat16_edit_result fat16_write(const struct fat16_volume *vol,
     }
 
     /* Publish the new chain before releasing the old one. */
-    if (!update_directory(vol, &entry, name, cluster, length))
+    if (!update_directory(vol, &entry, &name, cluster, length))
         return FAT16_EDIT_IO;
     if (entry.exists && !release_chain(vol, entry.first_cluster))
         return FAT16_EDIT_CLEANUP;
@@ -266,11 +281,13 @@ enum fat16_edit_result fat16_write(const struct fat16_volume *vol,
 enum fat16_edit_result fat16_remove(const struct fat16_volume *vol,
                                    const unsigned char *text_name, unsigned int name_size)
 {
-    unsigned char name[11];
-    if (!encode_name(name, text_name, name_size))
+    struct short_name name;
+    if (!encode_name(&name, text_name, name_size))
         return FAT16_EDIT_NAME;
     struct edit_entry entry;
-    enum fat16_edit_result result = find_entry(vol, name, &entry);
+    enum fat16_edit_result result = find_entry(vol, &name, &entry);
+    if (result == FAT16_EDIT_CASE)
+        return FAT16_EDIT_MISSING;
     if (result != FAT16_EDIT_OK)
         return result;
     if (!entry.exists)
