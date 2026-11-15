@@ -1,22 +1,13 @@
-#ifdef GPT_R_GRAPHICS
-#include "drivers/vga_graphics.h"
-
-void kernel_main(void)
-{
-    vga_graphics_splash();
-    for (;;)
-        __asm__ volatile ("cli; hlt");
-}
-
-#else
+#include "drivers/console.h"
 #include "memory/pages.h"
 #include "interrupts/idt.h"
 #include "drivers/timer.h"
 #include "drivers/keyboard.h"
 #include "shell/shell.h"
 
-enum { WIDTH = 80, HEIGHT = 25, TEXT_COLOR = 0x0f00 };
-static volatile unsigned short* const vga = (volatile unsigned short*)0xb8000;
+enum { TEXT_COLOR = 0x0f00 };
+
+#ifndef GPT_R_GRAPHICS
 
 static void out(unsigned short port, unsigned char value)
 {
@@ -76,36 +67,37 @@ static void load_accents(void)
     vga_register(0x3ce, 6, 0x0e);
 }
 
-static void clear_row(unsigned int row)
-{
-    for (unsigned int col = 0; col < WIDTH; ++col)
-        vga[row * WIDTH + col] = TEXT_COLOR | ' ';
-}
+#endif
 
 void kernel_main(void)
 {
     const char title[] = "GPT-R OS";
 
+#ifdef GPT_R_GRAPHICS
+    vga_graphics_init();
+#endif
     idt_init();
 #ifdef GPT_R_TEST_INVALID_OPCODE
     __asm__ volatile ("ud2");
 #endif
+#ifndef GPT_R_GRAPHICS
     load_accents();
     vga_register(0x3d4, 0x0a, 14);
     vga_register(0x3d4, 0x0b, 15);
-    for (unsigned int i = 0; i < HEIGHT; ++i)
-        clear_row(i);
+#endif
+    for (unsigned int i = 0; i < CONSOLE_WIDTH * CONSOLE_HEIGHT; ++i)
+        console_put(i, TEXT_COLOR | ' ');
     for (unsigned int i = 0; title[i]; ++i)
-        vga[i] = TEXT_COLOR | title[i];
+        console_put(i, TEXT_COLOR | title[i]);
 
     pages_init(E820_MAP);
 #ifdef GPT_R_TEST_PAGE_FAULT
-    volatile unsigned char* page = page_alloc();
+    volatile unsigned char *page = page_alloc();
     if ((unsigned long long)page < 0x200000)
         __asm__ volatile ("ud2");
     page[0] = 0xaa;
     page[4095] = 0x55;
-    if (page[0] != 0xaa || page[4095] != 0x55 || !page_free((void*)page))
+    if (page[0] != 0xaa || page[4095] != 0x55 || !page_free((void *)page))
         __asm__ volatile ("ud2");
 
     /* PDPT entry 1 is absent, even with 1 GiB or more installed. */
@@ -117,5 +109,3 @@ void kernel_main(void)
 
     shell_run();
 }
-
-#endif

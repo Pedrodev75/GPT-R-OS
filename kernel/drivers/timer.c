@@ -1,10 +1,9 @@
 #include "timer.h"
+#include "console.h"
 
-enum {
-    PIT_HZ = 1193182, TICKS_PER_SECOND = 100,
-    DIVISOR = (PIT_HZ + TICKS_PER_SECOND / 2) / TICKS_PER_SECOND,
-    COUNTER_COLUMN = 54
-};
+enum { PIT_HZ = 1193182, TICKS_PER_SECOND = 100,
+       DIVISOR = (PIT_HZ + TICKS_PER_SECOND / 2) / TICKS_PER_SECOND,
+       COUNTER_CELL = CONSOLE_WIDTH == 40 ? CONSOLE_WIDTH : 54 };
 
 static unsigned int ticks;
 static volatile unsigned long long seconds;
@@ -20,19 +19,18 @@ static void show_uptime(void)
     char digits[10];
     unsigned long long value = seconds;
     unsigned int length = 0;
-    volatile unsigned short* cell =
-        (volatile unsigned short*)0xb8000 + COUNTER_COLUMN;
+    unsigned int cell = COUNTER_CELL;
 
     for (unsigned int i = 0; label[i]; ++i)
-        *cell++ = 0x0f00 | label[i];
+        console_put(cell++, 0x0f00 | label[i]);
     do {
         digits[length++] = '0' + value % 10;
         value /= 10;
     } while (value && length < sizeof(digits));
     while (length)
-        *cell++ = 0x0f00 | digits[--length];
-    *cell++ = 0x0f00 | ' ';
-    *cell = 0x0f00 | 's';
+        console_put(cell++, 0x0f00 | digits[--length]);
+    console_put(cell++, 0x0f00 | ' ');
+    console_put(cell, 0x0f00 | 's');
 }
 
 void timer_init(void)
@@ -54,6 +52,10 @@ void timer_irq_handler(void)
         ++seconds;
         show_uptime();
     }
+#ifdef GPT_R_GRAPHICS
+    if (ticks == 0 || ticks == 50)
+        vga_graphics_blink();
+#endif
     out(0x20, 0x20);
 }
 

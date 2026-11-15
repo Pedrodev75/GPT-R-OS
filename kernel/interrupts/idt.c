@@ -1,3 +1,4 @@
+#include "../drivers/console.h"
 #include "idt.h"
 
 struct idt_gate {
@@ -53,7 +54,7 @@ struct exception_frame {
     unsigned long long vector, error, rip, cs, rflags, rsp, ss;
 };
 
-static const char* const exception_names[EXCEPTION_COUNT] = {
+static const char *const exception_names[EXCEPTION_COUNT] = {
     [0] = "#DE - Erro de divisao",
     [1] = "#DB - Depuracao",
     [2] = "NMI - Interrupcao nao mascaravel",
@@ -80,56 +81,56 @@ static const char* const exception_names[EXCEPTION_COUNT] = {
     [30] = "#SX - Excecao de seguranca"
 };
 
-static volatile unsigned short* write_text(volatile unsigned short* cell,
-    const char* text)
+static unsigned int write_text(unsigned int cell,
+                                            const char *text)
 {
     while (*text)
-        *cell++ = 0x4f00 | (unsigned char)*text++;
+        console_put(cell++, 0x4f00 | (unsigned char)*text++);
     return cell;
 }
 
-static void write_hex(volatile unsigned short* cell, const char* label,
-    unsigned long long value)
+static void write_hex(unsigned int cell, const char *label,
+                      unsigned long long value)
 {
     static const char hex[] = "0123456789ABCDEF";
     cell = write_text(cell, label);
     cell = write_text(cell, " 0x");
     for (int shift = 60; shift >= 0; shift -= 4)
-        *cell++ = 0x4f00 | hex[(value >> shift) & 15];
+        console_put(cell++, 0x4f00 | hex[(value >> shift) & 15]);
 }
 
-_Noreturn void exception_panic(const struct exception_frame* frame)
+_Noreturn void exception_panic(const struct exception_frame *frame)
 {
-    static const char* const labels[] = {
+    static const char *const labels[] = {
         "RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "R8",
         "R9", "R10", "R11", "R12", "R13", "R14", "R15"
     };
-    volatile unsigned short* const vga = (volatile unsigned short*)0xb8000;
     unsigned long long cr2 = 0;
     if (frame->vector == 14)
         __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
 
-    /* Hide the text cursor on the diagnostic screen. */
+#ifdef GPT_R_GRAPHICS
+    vga_graphics_cursor(CONSOLE_WIDTH * CONSOLE_HEIGHT);
+#else
     __asm__ volatile ("outb %%al, %%dx" : : "a"(0x0a), "d"(0x3d4));
     __asm__ volatile ("outb %%al, %%dx" : : "a"(0x20), "d"(0x3d5));
+#endif
+    for (unsigned int i = 0; i < CONSOLE_WIDTH * CONSOLE_HEIGHT; ++i)
+        console_put(i, 0x4f20);
+    write_text(0, "GPT-R OS - CPU EXCEPTION");
+    const char *name = exception_names[frame->vector];
+    write_text(CONSOLE_WIDTH, name ? name : "Vetor reservado");
 
-    for (unsigned int i = 0; i < 80 * 25; ++i)
-        vga[i] = 0x4f20;
-    write_text(vga, "GPT-R OS - CPU EXCEPTION");
-    const char* name = exception_names[frame->vector];
-    write_text(vga + 80, name ? name : "Vetor reservado");
-
-    write_hex(vga + 3 * 80, "VECTOR", frame->vector);
-    write_hex(vga + 3 * 80 + 40, "ERROR", frame->error);
-    write_hex(vga + 4 * 80, "RIP", frame->rip);
-    write_hex(vga + 4 * 80 + 40, "RFLAGS", frame->rflags);
-    write_hex(vga + 5 * 80, "RSP", frame->rsp);
+    write_hex(3 * CONSOLE_WIDTH, "VECTOR", frame->vector);
+    write_hex(4 * CONSOLE_WIDTH, "ERROR", frame->error);
+    write_hex(5 * CONSOLE_WIDTH, "RIP", frame->rip);
+    write_hex(6 * CONSOLE_WIDTH, "RFLAGS", frame->rflags);
+    write_hex(7 * CONSOLE_WIDTH, "RSP", frame->rsp);
     if (frame->vector == 14)
-        write_hex(vga + 5 * 80 + 40, "CR2", cr2);
+        write_hex(8 * CONSOLE_WIDTH, "CR2", cr2);
 
     for (unsigned int i = 0; i < 15; ++i)
-        write_hex(vga + (7 + i / 2) * 80 + (i % 2) * 40,
-            labels[i], frame->gpr[i]);
+        write_hex((10 + i) * CONSOLE_WIDTH, labels[i], frame->gpr[i]);
     for (;;)
         __asm__ volatile ("cli; hlt");
 }
