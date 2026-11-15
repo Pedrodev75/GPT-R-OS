@@ -88,37 +88,44 @@ void keyboard_irq_handler(void)
     write_port(0x20, 0x20);
 }
 
-static unsigned char wait_for_scan_code(void)
-{
-    __asm__ volatile ("cli" : : : "memory");
-    while (head == tail)
-        __asm__ volatile ("sti; hlt; cli" : : : "memory");
-
-    const unsigned char byte = queue[tail];
-    tail = (tail + 1) & QUEUE_MASK;
-    __asm__ volatile ("sti" : : : "memory");
-    return byte;
-}
-
-unsigned char keyboard_read_char(struct keyboard_state* keyboard)
+unsigned int keyboard_poll(struct keyboard_state* keyboard)
 {
     if (keyboard->pending) {
         const unsigned char ch = keyboard->pending;
         keyboard->pending = 0;
         return ch;
     }
-    unsigned int skip = 0;
+    /* IRQ1 owns head. Only the foreground consumer advances tail. */
+    while (head != tail) {
+        const unsigned char key = queue[tail];
+        tail = (tail + 1) & QUEUE_MASK;
 
-    for (;;) {
-        const unsigned char key = wait_for_scan_code();
-
-        if (skip) {
-            --skip;
+        if (keyboard->pause_bytes) {
+            --keyboard->pause_bytes;
             continue;
         }
-        if (key == 0xe0 || key == 0xe1) {
-            skip = key == 0xe0 ? 1 : 5;
+        if (key == 0xe1) {
+            keyboard->extended = 0;
+            keyboard->pause_bytes = 5;
             continue;
+        }
+        if (key == 0xe0) {
+            keyboard->extended = 1;
+            continue;
+        }
+        if (keyboard->extended) {
+            keyboard->extended = 0;
+            switch (key) {
+            case 0x48: return KEY_UP;
+            case 0x50: return KEY_DOWN;
+            case 0x4b: return KEY_LEFT;
+            case 0x4d: return KEY_RIGHT;
+            default: continue;
+            }
+        }
+        if (key == 1) {
+            keyboard->accent = 0;
+            return KEY_ESCAPE;
         }
 
         const unsigned int code = key & 0x7f;
@@ -163,5 +170,21 @@ unsigned char keyboard_read_char(struct keyboard_state* keyboard)
             return accent;
         }
         return ch;
+    }
+    return 0;
+}
+
+unsigned char keyboard_read_char(struct keyboard_state* keyboard)
+{
+    for (;;) {
+        const unsigned int key = keyboard_poll(keyboard);
+        if (key >= 1 && key <= 255 && key != KEY_ESCAPE)
+            return key;
+
+        __asm__ volatile ("cli" : : : "memory");
+        if (head == tail)
+            __asm__ volatile ("sti; hlt" : : : "memory");
+        else
+            __asm__ volatile ("sti" : : : "memory");
     }
 }

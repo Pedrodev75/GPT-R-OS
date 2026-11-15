@@ -110,6 +110,7 @@ _Noreturn void exception_panic(const struct exception_frame* frame)
         __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
 
 #ifdef GPT_R_GRAPHICS
+    vga_graphics_restore_console();
     vga_graphics_cursor(CONSOLE_WIDTH * CONSOLE_HEIGHT);
 #else
     __asm__ volatile ("outb %%al, %%dx" : : "a"(0x0a), "d"(0x3d4));

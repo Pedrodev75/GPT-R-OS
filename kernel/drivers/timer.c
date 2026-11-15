@@ -1,11 +1,14 @@
 #include "timer.h"
 #include "console.h"
 
-enum { PIT_HZ = 1193182, TICKS_PER_SECOND = 100,
-       DIVISOR = (PIT_HZ + TICKS_PER_SECOND / 2) / TICKS_PER_SECOND,
-       COUNTER_CELL = CONSOLE_WIDTH == 40 ? CONSOLE_WIDTH : 54 };
+enum {
+    PIT_HZ = 1193182, TICKS_PER_SECOND = 100,
+    DIVISOR = (PIT_HZ + TICKS_PER_SECOND / 2) / TICKS_PER_SECOND,
+    COUNTER_CELL = CONSOLE_WIDTH == 40 ? CONSOLE_WIDTH : 54
+};
 
 static unsigned int ticks;
+static volatile unsigned int total_ticks;
 static volatile unsigned long long seconds;
 
 static void out(unsigned short port, unsigned char value)
@@ -36,6 +39,7 @@ static void show_uptime(void)
 void timer_init(void)
 {
     ticks = 0;
+    total_ticks = 0;
     seconds = 0;
     show_uptime();
 
@@ -47,6 +51,7 @@ void timer_init(void)
 
 void timer_irq_handler(void)
 {
+    ++total_ticks;
     if (++ticks == TICKS_PER_SECOND) {
         ticks = 0;
         ++seconds;
@@ -62,4 +67,9 @@ void timer_irq_handler(void)
 unsigned long long timer_uptime_seconds(void)
 {
     return seconds;
+}
+
+unsigned int timer_ticks(void)
+{
+    return total_ticks;
 }
