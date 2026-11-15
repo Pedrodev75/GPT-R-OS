@@ -8,8 +8,12 @@ struct ata_disk {
     char model[41];
 };
 
-int ata_identify(struct ata_disk *disk);
-int ata_read_sector(const struct ata_disk *disk, unsigned int lba,
-                    unsigned char data[ATA_SECTOR_SIZE]);
+int ata_identify(struct ata_disk* disk);
+int ata_read_sector(const struct ata_disk* disk, unsigned int lba,
+    unsigned char data[ATA_SECTOR_SIZE]);
+
+/* Transfer one sector and wait for the device to flush its write cache. */
+int ata_write_sector(const struct ata_disk* disk, unsigned int lba,
+    const unsigned char data[ATA_SECTOR_SIZE]);
 
 #endif

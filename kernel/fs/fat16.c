@@ -1,18 +1,18 @@
 #include "fat16.h"
 
-static unsigned int little16(const unsigned char *bytes)
+static unsigned int little16(const unsigned char* bytes)
 {
     return bytes[0] | ((unsigned int)bytes[1] << 8);
 }
 
-static unsigned int little32(const unsigned char *bytes)
+static unsigned int little32(const unsigned char* bytes)
 {
     return little16(bytes) | (little16(bytes + 2) << 16);
 }
 
-static int parse_bpb(struct fat16_volume *volume, const struct ata_disk *disk,
-                     const unsigned char *boot, unsigned int start,
-                     unsigned int available)
+static int parse_bpb(struct fat16_volume* volume, const struct ata_disk* disk,
+    const unsigned char* boot, unsigned int start,
+    unsigned int available)
 {
     const unsigned int spc = boot[13];
     const unsigned int reserved = little16(boot + 14);
@@ -35,14 +35,14 @@ static int parse_bpb(struct fat16_volume *volume, const struct ata_disk *disk,
     if (clusters < 4085 || clusters >= 65525 ||
         fat_sectors * 256 < clusters + 2)
         return 0;
-    *volume = (struct fat16_volume) {
-        disk, start + reserved, start + root, start + data,
+    *volume = (struct fat16_volume){
+        disk, start + reserved, fat_sectors, fats, start + root, start + data,
         clusters, entries, spc
     };
     return 1;
 }
 
-int fat16_mount(struct fat16_volume *volume, const struct ata_disk *disk)
+int fat16_mount(struct fat16_volume* volume, const struct ata_disk* disk)
 {
     unsigned char boot[512], partition[512];
     if (!ata_read_sector(disk, 0, boot))
@@ -52,7 +52,7 @@ int fat16_mount(struct fat16_volume *volume, const struct ata_disk *disk)
     if (little16(boot + 510) != 0xaa55)
         return 0;
     for (unsigned int i = 0; i < 4; ++i) {
-        const unsigned char *entry = boot + 446 + 16 * i;
+        const unsigned char* entry = boot + 446 + 16 * i;
         const unsigned int type = entry[4];
         const unsigned int start = little32(entry + 8);
         const unsigned int size = little32(entry + 12);
@@ -65,8 +65,8 @@ int fat16_mount(struct fat16_volume *volume, const struct ata_disk *disk)
     return 0;
 }
 
-int fat16_next(const struct fat16_volume *volume, struct fat16_dir *dir,
-               struct fat16_file *file)
+int fat16_next(const struct fat16_volume* volume, struct fat16_dir* dir,
+    struct fat16_file* file)
 {
     while (dir->index < volume->root_entries) {
         const unsigned int index = dir->index;
@@ -74,7 +74,7 @@ int fat16_next(const struct fat16_volume *volume, struct fat16_dir *dir,
             !ata_read_sector(volume->disk, volume->root_start + index / 16, dir->sector))
             return -1;
         ++dir->index;
-        const unsigned char *entry = dir->sector + (index % 16) * 32;
+        const unsigned char* entry = dir->sector + (index % 16) * 32;
         if (!entry[0]) {
             dir->index = volume->root_entries;
             return 0;
@@ -103,21 +103,21 @@ int fat16_next(const struct fat16_volume *volume, struct fat16_dir *dir,
     return 0;
 }
 
-int fat16_read(const struct fat16_volume *volume, const struct fat16_file *file,
-               void (*consume)(void *, const unsigned char *, unsigned int),
-               void *context)
+int fat16_read(const struct fat16_volume* volume, const struct fat16_file* file,
+    void (*consume)(void*, const unsigned char*, unsigned int),
+    void* context)
 {
     unsigned int remaining = file->size, cluster = file->first_cluster;
     unsigned char data[512];
     if ((unsigned long long)remaining > (unsigned long long)volume->clusters *
-                                        volume->sectors_per_cluster * 512)
+        volume->sectors_per_cluster * 512)
         return 0;
 
     while (remaining) {
         if (cluster < 2 || cluster >= volume->clusters + 2 || cluster >= 0xfff0)
             return 0;
         const unsigned int first = volume->data_start +
-                                   (cluster - 2) * volume->sectors_per_cluster;
+            (cluster - 2) * volume->sectors_per_cluster;
         for (unsigned int i = 0; i < volume->sectors_per_cluster && remaining; ++i) {
             if (!ata_read_sector(volume->disk, first + i, data))
                 return 0;

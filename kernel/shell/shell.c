@@ -43,7 +43,7 @@ static void clear_row(unsigned int row)
 
 enum { FIRST_ROW = 2, PROMPT_WIDTH = 2, MAX_INPUT = WIDTH - PROMPT_WIDTH };
 
-static void next_row(unsigned int *row)
+static void next_row(unsigned int* row)
 {
     if (*row < HEIGHT - 1) {
         ++*row;
@@ -54,7 +54,7 @@ static void next_row(unsigned int *row)
     clear_row(*row);
 }
 
-static void print_line(unsigned int *row, const char *text)
+static void print_line(unsigned int* row, const char* text)
 {
     unsigned int col = 0;
     while (*text) {
@@ -67,7 +67,7 @@ static void print_line(unsigned int *row, const char *text)
     next_row(row);
 }
 
-static int equals(const unsigned char *input, const char *command)
+static int equals(const unsigned char* input, const char* command)
 {
     while (*input && *input == (unsigned char)*command) {
         ++input;
@@ -76,13 +76,13 @@ static int equals(const unsigned char *input, const char *command)
     return *input == 0 && *command == 0;
 }
 
-static void print_number(unsigned int *row, const char *label,
-                         unsigned long long value, const char *unit)
+static void print_number(unsigned int* row, const char* label,
+    unsigned long long value, const char* unit)
 {
     char text[80];
     char digits[20];
     unsigned int length = 0;
-    char *output = text;
+    char* output = text;
     while (*label)
         *output++ = *label++;
     do {
@@ -102,7 +102,7 @@ static char hex_digit(unsigned int digit)
     return "0123456789ABCDEF"[digit & 15];
 }
 
-static void hex64(char *text, unsigned long long value)
+static void hex64(char* text, unsigned long long value)
 {
     for (int i = 15; i >= 0; --i) {
         text[i] = hex_digit(value);
@@ -110,9 +110,9 @@ static void hex64(char *text, unsigned long long value)
     }
 }
 
-static void show_memory(unsigned int *row)
+static void show_memory(unsigned int* row)
 {
-    const volatile struct e820_map *const map =
+    const volatile struct e820_map* const map =
         E820_MAP;
     const unsigned int count = map->count;
     if (map->status == 0 || count > E820_MAX_ENTRIES || !count) {
@@ -125,7 +125,7 @@ static void show_memory(unsigned int *row)
     print_line(row, "Base fisica        Tamanho (bytes)    Tipo E820");
     unsigned long long usable = 0;
     for (unsigned int i = 0; i < count; ++i) {
-        const volatile struct e820_entry *entry = &map->entries[i];
+        const volatile struct e820_entry* entry = &map->entries[i];
         const unsigned long long length = entry->length;
         const unsigned int type = entry->type;
         char line[] = "0x0000000000000000 0x0000000000000000 0x0000000000000000";
@@ -139,26 +139,26 @@ static void show_memory(unsigned int *row)
     print_line(row, "Tipo 1 = RAM utilizavel segundo a BIOS");
     print_number(row, "RAM utilizavel (E820): ", usable / 1024, " KiB");
     print_number(row, "RAM mapeada para alocacao: ",
-                 pages_managed_count() * (PAGE_SIZE / 1024), " KiB");
+        pages_managed_count() * (PAGE_SIZE / 1024), " KiB");
     print_number(row, "Paginas livres de 4 KiB: ", pages_free_count(), "");
 }
 
-static void show_address(unsigned int *row, unsigned long long address)
+static void show_address(unsigned int* row, unsigned long long address)
 {
     char line[] = "Endereco: 0x0000000000000000";
     hex64(line + 12, address);
     print_line(row, line);
 }
 
-static void test_memory(unsigned int *row)
+static void test_memory(unsigned int* row)
 {
-    volatile unsigned char *page = page_alloc();
+    volatile unsigned char* page = page_alloc();
     if (!page) {
         print_line(row, "memtest: nenhuma pagina livre");
         return;
     }
     show_address(row, (unsigned long long)page);
-    static const unsigned char patterns[] = {0xaa, 0x55};
+    static const unsigned char patterns[] = { 0xaa, 0x55 };
     unsigned int ok = 1;
     for (unsigned int p = 0; p < sizeof(patterns) && ok; ++p) {
         for (unsigned int i = 0; i < PAGE_SIZE; ++i)
@@ -171,13 +171,13 @@ static void test_memory(unsigned int *row)
             }
         }
     }
-    if (!page_free((void *)page))
+    if (!page_free((void*)page))
         print_line(row, "memtest: falha ao liberar pagina");
     else if (ok)
         print_line(row, "memtest: 4 KiB OK (0xAA e 0x55). Pagina liberada.");
 }
 
-static int parse_address(const unsigned char *text, unsigned long long *address)
+static int parse_address(const unsigned char* text, unsigned long long* address)
 {
     while (*text == ' ')
         ++text;
@@ -203,7 +203,7 @@ static int parse_address(const unsigned char *text, unsigned long long *address)
     return 1;
 }
 
-static void print_bytes(unsigned int *row, const volatile unsigned char *bytes)
+static void print_bytes(unsigned int* row, const volatile unsigned char* bytes)
 {
     char line[16 * 3];
     for (unsigned int i = 0; i < 16; ++i) {
@@ -216,7 +216,7 @@ static void print_bytes(unsigned int *row, const volatile unsigned char *bytes)
     print_line(row, line);
 }
 
-static void peek(unsigned int *row, const unsigned char *argument)
+static void peek(unsigned int* row, const unsigned char* argument)
 {
     enum { BYTE_COUNT = 16 };
     unsigned long long address;
@@ -229,13 +229,13 @@ static void peek(unsigned int *row, const unsigned char *argument)
         return;
     }
     show_address(row, address);
-    const volatile unsigned char *bytes = (const volatile unsigned char *)address;
+    const volatile unsigned char* bytes = (const volatile unsigned char*)address;
     print_bytes(row, bytes);
 }
 
-static unsigned int color_index(const unsigned char **argument)
+static unsigned int color_index(const unsigned char** argument)
 {
-    const unsigned char *text = *argument;
+    const unsigned char* text = *argument;
     while (*text == ' ')
         ++text;
     if (*text < '0' || *text > '9')
@@ -253,7 +253,7 @@ static unsigned int color_index(const unsigned char **argument)
     return value;
 }
 
-static void change_color(unsigned int *row, const unsigned char *argument)
+static void change_color(unsigned int* row, const unsigned char* argument)
 {
     const unsigned int foreground = color_index(&argument);
     const unsigned int background = color_index(&argument);
@@ -267,11 +267,11 @@ static void change_color(unsigned int *row, const unsigned char *argument)
         console_put(i, text_color | (console_get(i) & 0xff));
 }
 
-static void exhaust_pages(unsigned int *row)
+static void exhaust_pages(unsigned int* row)
 {
     const unsigned int initial = pages_free_count();
-    void **head = 0;
-    void **page;
+    void** head = 0;
+    void** page;
     unsigned int count = 0;
     /* Chain the test pages themselves so only those pages are freed. */
     while ((page = page_alloc())) {
@@ -294,39 +294,47 @@ static void exhaust_pages(unsigned int *row)
         print_line(row, "crash alloc: contagem inesperada");
 }
 
-static void crash_test(unsigned int *row, const unsigned char *type)
+static void crash_test(unsigned int* row, const unsigned char* type)
 {
     while (*type == ' ')
         ++type;
     if (equals(type, "ud")) {
         __asm__ volatile ("ud2");
-    } else if (equals(type, "div")) {
+    }
+    else if (equals(type, "div")) {
         __asm__ volatile ("xor %%ecx, %%ecx; xor %%edx, %%edx; "
-                          "mov $1, %%eax; div %%ecx"
-                          : : : "rax", "rcx", "rdx", "cc");
-    } else if (equals(type, "pf")) {
+            "mov $1, %%eax; div %%ecx"
+            : : : "rax", "rcx", "rdx", "cc");
+    }
+    else if (equals(type, "pf")) {
         __asm__ volatile ("movb (%0), %%al" : : "r"(0x40000000ull) : "rax", "memory");
-    } else if (equals(type, "gp")) {
+    }
+    else if (equals(type, "gp")) {
         /* Noncanonical in both 48-bit and 57-bit address modes. */
         __asm__ volatile ("movb (%0), %%al" : : "r"(0x8000000000000000ull)
-                          : "rax", "memory");
-    } else if (equals(type, "int3")) {
+            : "rax", "memory");
+    }
+    else if (equals(type, "int3")) {
         __asm__ volatile ("int3");
-    } else if (equals(type, "alloc")) {
+    }
+    else if (equals(type, "alloc")) {
         exhaust_pages(row);
-    } else if (equals(type, "hang")) {
+    }
+    else if (equals(type, "hang")) {
         __asm__ volatile ("cli; 1: pause; jmp 1b" : : : "memory");
         __builtin_unreachable();
-    } else if (equals(type, "triple")) {
-        const unsigned char empty_idtr[10] = {0};
+    }
+    else if (equals(type, "triple")) {
+        const unsigned char empty_idtr[10] = { 0 };
         __asm__ volatile ("cli; lidt %0; ud2" : : "m"(empty_idtr) : "memory");
         __builtin_unreachable();
-    } else {
+    }
+    else {
         print_line(row, "Uso: crash <ud|div|pf|gp|int3|alloc|hang|triple>");
     }
 }
 
-static const unsigned char *argument_for(const unsigned char *input, const char *name)
+static const unsigned char* argument_for(const unsigned char* input, const char* name)
 {
     while (*name && *input == (unsigned char)*name) {
         ++input;
@@ -335,7 +343,7 @@ static const unsigned char *argument_for(const unsigned char *input, const char 
     return !*name && (!*input || *input == ' ') ? input : 0;
 }
 
-static int open_disk(unsigned int *row, struct ata_disk *disk)
+static int open_disk(unsigned int* row, struct ata_disk* disk)
 {
     if (ata_identify(disk))
         return 1;
@@ -343,7 +351,7 @@ static int open_disk(unsigned int *row, struct ata_disk *disk)
     return 0;
 }
 
-static void disk_info(unsigned int *row)
+static void disk_info(unsigned int* row)
 {
     struct ata_disk disk;
     if (!open_disk(row, &disk))
@@ -353,18 +361,18 @@ static void disk_info(unsigned int *row)
     print_number(row, "Capacidade acessivel: ", (unsigned long long)disk.sectors * 512, " bytes");
 }
 
-static const unsigned char *skip_spaces(const unsigned char *text)
+static const unsigned char* skip_spaces(const unsigned char* text)
 {
     while (*text == ' ')
         ++text;
     return text;
 }
 
-static void show_sector(unsigned int *row, const unsigned char *argument)
+static void show_sector(unsigned int* row, const unsigned char* argument)
 {
     unsigned int lba = 0;
-    const unsigned char *text = skip_spaces(argument);
-    const unsigned char *start = text;
+    const unsigned char* text = skip_spaces(argument);
+    const unsigned char* start = text;
     while (*text >= '0' && *text <= '9') {
         const unsigned int digit = *text++ - '0';
         if (lba > (0xffffffffu - digit) / 10) {
@@ -394,8 +402,8 @@ static void show_sector(unsigned int *row, const unsigned char *argument)
     print_bytes(row, data);
 }
 
-static int open_volume(unsigned int *row, struct ata_disk *disk,
-                       struct fat16_volume *volume)
+static int open_volume(unsigned int* row, struct ata_disk* disk,
+    struct fat16_volume* volume)
 {
     if (!open_disk(row, disk))
         return 0;
@@ -405,7 +413,7 @@ static int open_volume(unsigned int *row, struct ata_disk *disk,
     return 0;
 }
 
-static void list_files(unsigned int *row)
+static void list_files(unsigned int* row)
 {
     struct ata_disk disk;
     struct fat16_volume volume;
@@ -439,7 +447,7 @@ static unsigned char upper_ascii(unsigned char ch)
     return ch >= 'a' && ch <= 'z' ? ch - 'a' + 'A' : ch;
 }
 
-static int same_filename(const unsigned char *input, const char *filename)
+static int same_filename(const unsigned char* input, const char* filename)
 {
     while (*input && upper_ascii(*input) == upper_ascii(*filename)) {
         ++input;
@@ -449,11 +457,11 @@ static int same_filename(const unsigned char *input, const char *filename)
 }
 
 struct cat_output {
-    unsigned int *row;
+    unsigned int* row;
     unsigned int col;
 };
 
-static void cat_byte(struct cat_output *output, unsigned char ch)
+static void cat_byte(struct cat_output* output, unsigned char ch)
 {
     if (output->col == WIDTH) {
         next_row(output->row);
@@ -462,27 +470,29 @@ static void cat_byte(struct cat_output *output, unsigned char ch)
     console_put(*output->row * WIDTH + output->col++, text_color | ch);
 }
 
-static void cat_chunk(void *context, const unsigned char *data, unsigned int size)
+static void cat_chunk(void* context, const unsigned char* data, unsigned int size)
 {
-    struct cat_output *output = context;
+    struct cat_output* output = context;
     for (unsigned int i = 0; i < size; ++i) {
         const unsigned char ch = data[i];
         if (ch == '\n') {
             next_row(output->row);
             output->col = 0;
-        } else if (ch == '\t') {
+        }
+        else if (ch == '\t') {
             const unsigned int spaces = 4 - output->col % 4;
             for (unsigned int j = 0; j < spaces; ++j)
                 cat_byte(output, ' ');
-        } else if (ch != '\r') {
+        }
+        else if (ch != '\r') {
             cat_byte(output, ch >= 32 && ch <= 126 ? ch : '?');
         }
     }
 }
 
-static void cat_file(unsigned int *row, const unsigned char *argument)
+static void cat_file(unsigned int* row, const unsigned char* argument)
 {
-    const unsigned char *name = skip_spaces(argument);
+    const unsigned char* name = skip_spaces(argument);
     if (!*name) {
         print_line(row, "Uso: cat <arquivo>");
         return;
@@ -511,9 +521,51 @@ static void cat_file(unsigned int *row, const unsigned char *argument)
     print_line(row, result < 0 ? "Falha ao ler diretorio" : "Arquivo nao encontrado");
 }
 
-static void execute(unsigned int *row, unsigned char *line, unsigned int length
+static void edit_file(unsigned int* row, const unsigned char* argument, int remove)
+{
+    static const char* const errors[] = {
+        [FAT16_EDIT_NAME] = "Nome 8.3 invalido",
+        [FAT16_EDIT_SIZE] = "Texto maior que um setor",
+        [FAT16_EDIT_MISSING] = "Arquivo nao encontrado",
+        [FAT16_EDIT_PROTECTED] = "Entrada protegida ou com nome longo",
+        [FAT16_EDIT_FULL] = "Disco ou diretorio cheio",
+        [FAT16_EDIT_IO] = "Falha de disco ou FAT inconsistente",
+        [FAT16_EDIT_CLEANUP] = "Diretorio atualizado; falha ao liberar clusters antigos"
+    };
+    const unsigned char* name = skip_spaces(argument);
+    const unsigned char* end = name;
+    while (*end && *end != ' ')
+        ++end;
+    const unsigned char* content = skip_spaces(end);
+    if (name == end || (remove ? *content != 0 : *content == 0)) {
+        print_line(row, remove ? "Uso: rm <arquivo>" : "Uso: write <arquivo> <texto>");
+        return;
+    }
+    unsigned int length = 0;
+    while (content[length]) {
+        if (content[length] < 32 || content[length] > 126) {
+            print_line(row, "write: use texto ASCII");
+            return;
+        }
+        ++length;
+    }
+
+    struct ata_disk disk;
+    struct fat16_volume volume;
+    if (!open_volume(row, &disk, &volume))
+        return;
+    const enum fat16_edit_result result = remove ?
+        fat16_remove(&volume, name, end - name) :
+        fat16_write(&volume, name, end - name, content, length);
+    if (result == FAT16_EDIT_OK)
+        print_line(row, remove ? "Arquivo removido" : "Arquivo salvo");
+    else
+        print_line(row, errors[result]);
+}
+
+static void execute(unsigned int* row, unsigned char* line, unsigned int length
 #ifdef GPT_R_GRAPHICS
-                    , struct keyboard_state *keyboard
+    , struct keyboard_state* keyboard
 #endif
 )
 {
@@ -525,7 +577,7 @@ static void execute(unsigned int *row, unsigned char *line, unsigned int length
         --length;
     line[length] = 0;
 
-    const unsigned char *argument;
+    const unsigned char* argument;
     if (equals(line, "help")) {
         print_line(row, "help     Lista os comandos");
         print_line(row, "clear    Limpa o terminal");
@@ -539,52 +591,75 @@ static void execute(unsigned int *row, unsigned char *line, unsigned int length
         print_line(row, "sector   Mostra 16 bytes de um setor");
         print_line(row, "ls       Lista arquivos FAT16");
         print_line(row, "cat      Mostra o texto de um arquivo");
+        print_line(row, "write    Cria ou sobrescreve um arquivo");
+        print_line(row, "rm       Remove um arquivo");
         print_line(row, "color    Muda as cores do terminal");
         print_line(row, "crash    Executa testes de erro e de limite");
 #ifdef GPT_R_GRAPHICS
         print_line(row, "demo     Abre a demonstracao VGA");
-    } else if (equals(line, "demo")) {
+    }
+    else if (equals(line, "demo")) {
         vga_graphics_demo(keyboard);
 #endif
-    } else if (equals(line, "clear")) {
+    }
+    else if (equals(line, "clear")) {
         for (unsigned int i = FIRST_ROW; i < HEIGHT; ++i)
             clear_row(i);
         *row = FIRST_ROW;
-    } else if (equals(line, "version")) {
+    }
+    else if (equals(line, "version")) {
         print_line(row, "GPT-R OS v0.4.0");
-    } else if (equals(line, "uptime")) {
+    }
+    else if (equals(line, "uptime")) {
         print_number(row, "", timer_uptime_seconds(), " s");
-    } else if (equals(line, "mem")) {
+    }
+    else if (equals(line, "mem")) {
         show_memory(row);
-    } else if (equals(line, "memtest")) {
+    }
+    else if (equals(line, "memtest")) {
         test_memory(row);
-    } else if ((argument = argument_for(line, "peek"))) {
+    }
+    else if ((argument = argument_for(line, "peek"))) {
         peek(row, argument);
-    } else if (equals(line, "diskinfo")) {
+    }
+    else if (equals(line, "diskinfo")) {
         disk_info(row);
-    } else if ((argument = argument_for(line, "sector"))) {
+    }
+    else if ((argument = argument_for(line, "sector"))) {
         show_sector(row, argument);
-    } else if (equals(line, "ls")) {
+    }
+    else if (equals(line, "ls")) {
         list_files(row);
-    } else if ((argument = argument_for(line, "cat"))) {
+    }
+    else if ((argument = argument_for(line, "cat"))) {
         cat_file(row, argument);
-    } else if (equals(line, "reboot")) {
+    }
+    else if ((argument = argument_for(line, "write"))) {
+        edit_file(row, argument, 0);
+    }
+    else if ((argument = argument_for(line, "rm"))) {
+        edit_file(row, argument, 1);
+    }
+    else if (equals(line, "reboot")) {
         /* System reset control on the QEMU PC chipset. */
         out(0xcf9, 0x02);
         out(0xcf9, 0x06);
         print_line(row, "reboot: controlador nao reiniciou");
-    } else if ((argument = argument_for(line, "color"))) {
+    }
+    else if ((argument = argument_for(line, "color"))) {
         change_color(row, argument);
-    } else if ((argument = argument_for(line, "crash"))) {
+    }
+    else if ((argument = argument_for(line, "crash"))) {
         crash_test(row, argument);
-    } else if (length) {
+    }
+    else if (length) {
         print_line(row, "Comando desconhecido");
     }
 }
 
 _Noreturn void shell_run(void)
 {
-    struct keyboard_state keyboard = {0};
+    struct keyboard_state keyboard = { 0 };
     unsigned char line[MAX_INPUT + 1];
     unsigned int row = FIRST_ROW;
     text_color = 0x0f00;
@@ -604,7 +679,8 @@ _Noreturn void shell_run(void)
             if (ch == '\b') {
                 if (length)
                     console_put(row * WIDTH + PROMPT_WIDTH + --length, text_color | ' ');
-            } else if (length < MAX_INPUT) {
+            }
+            else if (length < MAX_INPUT) {
                 line[length++] = ch;
                 console_put(row * WIDTH + col, text_color | ch);
             }

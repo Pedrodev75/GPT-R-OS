@@ -26,6 +26,11 @@ static unsigned short in_word(unsigned short port)
     return value;
 }
 
+static void out_word(unsigned short port, unsigned short value)
+{
+    __asm__ volatile ("outw %0, %w1" : : "a"(value), "Nd"(port));
+}
+
 static void settle(void)
 {
     for (unsigned int i = 0; i < 4; ++i)
@@ -87,8 +92,8 @@ int ata_identify(struct ata_disk *disk)
     return 1;
 }
 
-int ata_read_sector(const struct ata_disk *disk, unsigned int lba,
-                    unsigned char data[ATA_SECTOR_SIZE])
+static int begin_transfer(const struct ata_disk *disk, unsigned int lba,
+                          unsigned char command)
 {
     if (lba >= disk->sectors || lba >= LBA28_LIMIT)
         return 0;
@@ -100,15 +105,36 @@ int ata_read_sector(const struct ata_disk *disk, unsigned int lba,
     out_byte(LBA_LOW, lba);
     out_byte(LBA_MID, lba >> 8);
     out_byte(LBA_HIGH, lba >> 16);
-    out_byte(COMMAND, 0x20);
+    out_byte(COMMAND, command);
     settle();
-    if (!wait_status(DRQ, DRQ, 1))
+    return wait_status(DRQ, DRQ, 1);
+}
+
+int ata_read_sector(const struct ata_disk *disk, unsigned int lba,
+                    unsigned char data[ATA_SECTOR_SIZE])
+{
+    if (!begin_transfer(disk, lba, 0x20))
         return 0;
     for (unsigned int i = 0; i < ATA_SECTOR_SIZE; i += 2) {
         const unsigned short word = in_word(DATA);
         data[i] = word & 255;
         data[i + 1] = word >> 8;
     }
+    settle();
+    return wait_status(DRQ, 0, 1);
+}
+
+int ata_write_sector(const struct ata_disk *disk, unsigned int lba,
+                     const unsigned char data[ATA_SECTOR_SIZE])
+{
+    if (!begin_transfer(disk, lba, 0x30))
+        return 0;
+    for (unsigned int i = 0; i < ATA_SECTOR_SIZE; i += 2)
+        out_word(DATA, data[i] | ((unsigned short)data[i + 1] << 8));
+    settle();
+    if (!wait_status(DRQ, 0, 1))
+        return 0;
+    out_byte(COMMAND, 0xe7);
     settle();
     return wait_status(DRQ, 0, 1);
 }
