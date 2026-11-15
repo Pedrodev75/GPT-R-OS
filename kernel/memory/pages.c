@@ -15,6 +15,7 @@ enum {
 
 static unsigned char pages[PAGE_COUNT];
 static unsigned int free_count;
+static unsigned int managed_count;
 
 static int range_is_usable(const volatile struct e820_map* map,
     unsigned long long address, unsigned int size)
@@ -63,6 +64,7 @@ void pages_init(const volatile struct e820_map* map)
         pages[i] = complete && range_is_usable(map, address, PAGE_SIZE) ? FREE : RESERVED;
         free_count += pages[i] == FREE;
     }
+    managed_count = free_count;
     unsigned long long cr3;
     __asm__ volatile ("mov %%cr3, %0; mov %0, %%cr3" : "=&r"(cr3) : : "memory");
 }
@@ -96,4 +98,22 @@ int page_free(void* page)
 unsigned int pages_free_count(void)
 {
     return free_count;
+}
+
+unsigned int pages_managed_count(void)
+{
+    return managed_count;
+}
+
+int pages_contains_range(unsigned long long address, unsigned int length)
+{
+    if (!length || address < FIRST_ADDRESS || address >= END_ADDRESS ||
+        length > END_ADDRESS - address)
+        return 0;
+    const unsigned int first = (address - FIRST_ADDRESS) / PAGE_SIZE;
+    const unsigned int last = (address + length - 1 - FIRST_ADDRESS) / PAGE_SIZE;
+    for (unsigned int i = first; i <= last; ++i)
+        if (pages[i] == RESERVED)
+            return 0;
+    return 1;
 }
