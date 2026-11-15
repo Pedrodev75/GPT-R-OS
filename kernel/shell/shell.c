@@ -146,6 +146,7 @@ static const struct command {
     {"sector", "Mostra 16 bytes de um setor", shell_sector, 1},
     {"ls", "Lista arquivos FAT16", shell_ls, 0},
     {"cat", "Mostra o texto de um arquivo", shell_cat, 1},
+    {"run", "Executa um programa .APP", shell_run_app, 1},
     {"write", "Cria ou sobrescreve um arquivo", shell_write, 1},
     {"rm", "Remove um arquivo", shell_rm, 1},
     {"color", "Muda as cores do terminal", command_color, 1},

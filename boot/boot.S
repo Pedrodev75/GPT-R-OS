@@ -297,6 +297,11 @@ gdt:
     .quad 0
     .quad 0x00af9a000000ffff
     .quad 0x00cf92000000ffff
+    .quad 0x00cff2000000ffff   # Ring 3 data (0x1b).
+    .quad 0x00affa000000ffff   # Ring 3 code (0x23).
+.global app_tss_descriptor
+app_tss_descriptor:
+    .quad 0, 0                # TSS descriptor (0x28), filled by the kernel.
 gdtr:
     .word gdtr - gdt - 1
     .long gdt

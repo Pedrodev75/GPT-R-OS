@@ -1,3 +1,4 @@
+#include "../apps/app.h"
 #include "../drivers/console.h"
 #include "idt.h"
 
@@ -19,11 +20,12 @@ struct idt_pointer {
 _Static_assert(sizeof(struct idt_gate) == 16, "Invalid IDT gate size");
 _Static_assert(sizeof(struct idt_pointer) == 10, "Invalid IDTR operand size");
 
-enum { EXCEPTION_COUNT = 32, KEYBOARD_VECTOR = 0x21, KERNEL_CODE_SELECTOR = 0x08 };
+enum { EXCEPTION_COUNT = 32, KEYBOARD_VECTOR = 0x21, SYSCALL_VECTOR = 0x80, KERNEL_CODE_SELECTOR = 0x08 };
 extern void (* const exception_entries[EXCEPTION_COUNT])(void);
 extern void timer_irq_entry(void);
 extern void keyboard_irq_entry(void);
-static struct idt_gate idt[KEYBOARD_VECTOR + 1] __attribute__((aligned(16)));
+extern void app_syscall_entry(void);
+static struct idt_gate idt[SYSCALL_VECTOR + 1] __attribute__((aligned(16)));
 
 static void set_gate(unsigned int vector, void (*entry)(void))
 {
@@ -43,6 +45,10 @@ void idt_init(void)
         set_gate(i, exception_entries[i]);
     set_gate(0x20, timer_irq_entry);
     set_gate(KEYBOARD_VECTOR, keyboard_irq_entry);
+    for (unsigned int i = KEYBOARD_VECTOR + 1; i < SYSCALL_VECTOR; ++i)
+        idt[i] = (struct idt_gate){0};
+    set_gate(SYSCALL_VECTOR, app_syscall_entry);
+    idt[SYSCALL_VECTOR].attributes = 0xee;
 
     const struct idt_pointer pointer = { sizeof(idt) - 1, (unsigned long long)idt };
     __asm__ volatile ("lidt %0" : : "m"(pointer) : "memory");
@@ -108,6 +114,7 @@ _Noreturn void exception_panic(const struct exception_frame* frame)
     unsigned long long cr2 = 0;
     if (frame->vector == 14)
         __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+    app_handle_exception(frame->cs, frame->vector, frame->rip, cr2);
 
 #ifdef GPT_R_GRAPHICS
     vga_graphics_restore_console();

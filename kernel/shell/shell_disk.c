@@ -1,3 +1,4 @@
+#include "../apps/app.h"
 #include "shell_internal.h"
 #include "../fs/fat16.h"
 
@@ -149,12 +150,12 @@ static unsigned int encode_text(unsigned char *bytes, const unsigned char *text)
     return size;
 }
 
-struct cat_output {
+struct text_output {
     unsigned int *row;
     unsigned int col, codepoint, continuation, minimum;
 };
 
-static void cat_byte(struct cat_output *output, unsigned char ch)
+static void text_byte(struct text_output *output, unsigned char ch)
 {
     if (output->col == WIDTH) {
         shell_next_row(output->row);
@@ -163,9 +164,9 @@ static void cat_byte(struct cat_output *output, unsigned char ch)
     console_put(*output->row * WIDTH + output->col++, console_color | ch);
 }
 
-static void cat_chunk(void *context, const unsigned char *data, unsigned int size)
+static void text_chunk(void *context, const unsigned char *data, unsigned int size)
 {
-    struct cat_output *output = context;
+    struct text_output *output = context;
     for (unsigned int i = 0; i < size; ++i) {
         const unsigned char ch = data[i];
         if (output->continuation) {
@@ -173,12 +174,12 @@ static void cat_chunk(void *context, const unsigned char *data, unsigned int siz
                 output->codepoint = (output->codepoint << 6) | (ch & 63);
                 if (!--output->continuation) {
                     unsigned int cp = output->codepoint;
-                    cat_byte(output, cp >= output->minimum ? codepoint_glyph(cp) : '?');
+                    text_byte(output, cp >= output->minimum ? codepoint_glyph(cp) : '?');
                 }
                 continue;
             }
             output->continuation = 0;
-            cat_byte(output, '?');
+            text_byte(output, '?');
         }
         if (ch >= 0xc2 && ch <= 0xdf) {
             output->continuation = 1;
@@ -198,11 +199,32 @@ static void cat_chunk(void *context, const unsigned char *data, unsigned int siz
         } else if (ch == '\t') {
             const unsigned int spaces = 4 - output->col % 4;
             for (unsigned int j = 0; j < spaces; ++j)
-                cat_byte(output, ' ');
+                text_byte(output, ' ');
         } else if (ch != '\r') {
-            cat_byte(output, ch >= 32 && ch <= 126 ? ch : '?');
+            text_byte(output, ch >= 32 && ch <= 126 ? ch : '?');
         }
     }
+}
+
+static void finish_text(struct text_output *output)
+{
+    if (output->continuation)
+        text_byte(output, '?');
+    if (output->col)
+        shell_next_row(output->row);
+}
+
+static int find_file(unsigned int *row, const struct fat16_volume *volume,
+    const unsigned char *name, struct fat16_file *file)
+{
+    struct fat16_dir dir;
+    dir.index = 0;
+    int result;
+    while ((result = fat16_next(volume, &dir, file)) > 0)
+        if (same_filename(name, file->name))
+            return 1;
+    shell_print_line(row, result < 0 ? "Falha ao ler diretorio" : "Arquivo nao encontrado");
+    return 0;
 }
 
 void shell_cat(unsigned int *row, const unsigned char *argument)
@@ -215,27 +237,60 @@ void shell_cat(unsigned int *row, const unsigned char *argument)
 
     struct ata_disk disk;
     struct fat16_volume volume;
-    if (!open_volume(row, &disk, &volume))
+    struct fat16_file file;
+    if (!open_volume(row, &disk, &volume) || !find_file(row, &volume, name, &file))
         return;
 
-    struct fat16_dir dir;
-    dir.index = 0;
-    struct fat16_file file;
-    int result;
-    while ((result = fat16_next(&volume, &dir, &file)) > 0) {
-        if (!same_filename(name, file.name))
-            continue;
-        struct cat_output output = { .row = row };
-        const int read_ok = fat16_read(&volume, &file, cat_chunk, &output);
-        if (output.continuation)
-            cat_byte(&output, '?');
-        if (output.col)
-            shell_next_row(row);
-        if (!read_ok)
-            shell_print_line(row, "Falha ao ler arquivo ou cadeia FAT16");
+    struct text_output output = { .row = row };
+    const int read_ok = fat16_read(&volume, &file, text_chunk, &output);
+    finish_text(&output);
+    if (!read_ok)
+        shell_print_line(row, "Falha ao ler arquivo ou cadeia FAT16");
+}
+
+void shell_run_app(unsigned int *row, const unsigned char *argument)
+{
+    const unsigned char *name = shell_skip_spaces(argument);
+    if (!*name) {
+        shell_print_line(row, "Uso: run <arquivo.APP>");
         return;
     }
-    shell_print_line(row, result < 0 ? "Falha ao ler diretorio" : "Arquivo nao encontrado");
+
+    struct ata_disk disk;
+    struct fat16_volume volume;
+    struct fat16_file file;
+    if (!open_volume(row, &disk, &volume) || !find_file(row, &volume, name, &file))
+        return;
+
+    struct text_output output = { .row = row };
+    const struct app_result result = app_run(&volume, &file, text_chunk, &output);
+    finish_text(&output);
+    switch (result.status) {
+    case APP_EXITED:
+        shell_print_number(row, "Codigo de saida: ", result.exit_code, "");
+        break;
+    case APP_FAULTED: {
+        char rip[] = "RIP 0x0000000000000000";
+        shell_print_number(row, "Falha do programa, vetor: ", result.vector, "");
+        shell_hex64(rip + 6, result.rip);
+        shell_print_line(row, rip);
+        if (result.vector == 14) {
+            char cr2[] = "CR2 0x0000000000000000";
+            shell_hex64(cr2 + 6, result.fault_address);
+            shell_print_line(row, cr2);
+        }
+        break;
+    }
+    case APP_INVALID:
+        shell_print_line(row, "Formato APP invalido");
+        break;
+    case APP_READ_ERROR:
+        shell_print_line(row, "Falha ao ler arquivo ou cadeia FAT16");
+        break;
+    case APP_NO_MEMORY:
+        shell_print_line(row, "Sem memoria para executar o programa");
+        break;
+    }
 }
 
 static void edit_file(unsigned int *row, const unsigned char *argument, int remove)

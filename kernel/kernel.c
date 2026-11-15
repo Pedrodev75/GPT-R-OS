@@ -1,3 +1,4 @@
+#include "apps/app.h"
 #include "drivers/console.h"
 #include "memory/pages.h"
 #include "memory/heap.h"
@@ -164,6 +165,7 @@ void kernel_main(void)
     /* PDPT entry 1 is absent, even with 1 GiB or more installed. */
     __asm__ volatile ("movb (%0), %%al" : : "r"(0x40000000ull) : "rax", "memory");
 #endif
+    app_init();
     timer_init();
     const int keyboard_ok = keyboard_irq_init();
     __asm__ volatile ("sti" : : : "memory");

@@ -30,6 +30,7 @@ void shell_kfree(unsigned int *row, const unsigned char *argument);
 void shell_diskinfo(unsigned int *row, const unsigned char *argument);
 void shell_sector(unsigned int *row, const unsigned char *argument);
 void shell_ls(unsigned int *row, const unsigned char *argument);
+void shell_run_app(unsigned int *row, const unsigned char *argument);
 void shell_cat(unsigned int *row, const unsigned char *argument);
 void shell_write(unsigned int *row, const unsigned char *argument);
 void shell_rm(unsigned int *row, const unsigned char *argument);
