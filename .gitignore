@@ -3,3 +3,5 @@
 /os.img
 /coisadoqemu.txt
 /os-vga.img
+/disk-fat16.img
+/os-vbe.img
