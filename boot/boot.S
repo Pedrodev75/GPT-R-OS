@@ -51,6 +51,25 @@ disk_error:
 .section .stage2,"ax"
 stage2:
     call collect_e820
+.ifdef GPT_R_GRAPHICS
+    # Copy 128 BIOS ROM 8x8 glyphs above the E820 handoff and below the stack.
+    mov ax, 0x1130
+    mov bh, 3
+    int 0x10
+    push es
+    pop ds
+    mov si, bp
+    xor ax, ax
+    mov es, ax
+    mov di, 0x6000
+    mov cx, 1024
+    cld
+    rep movsb
+    mov ds, ax
+
+    mov ax, 0x0013
+    int 0x10
+.endif
     cli
     xor ax, ax
     mov ds, ax

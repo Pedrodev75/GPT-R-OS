@@ -1,3 +1,14 @@
+#ifdef GPT_R_GRAPHICS
+#include "drivers/vga_graphics.h"
+
+void kernel_main(void)
+{
+    vga_graphics_splash();
+    for (;;)
+        __asm__ volatile ("cli; hlt");
+}
+
+#else
 #include "memory/pages.h"
 #include "interrupts/idt.h"
 #include "drivers/timer.h"
@@ -106,3 +117,5 @@ void kernel_main(void)
 
     shell_run();
 }
+
+#endif
