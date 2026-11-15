@@ -18,11 +18,22 @@ start:
     int 0x10
     pop dx
 
-    # Read sectors 2 through 17 on the first floppy track.
+    # Read sectors 2-18 on head 0, then sectors 1-18 on head 1.
+    push dx
     mov bx, 0x7e00
-    mov ax, 0x0210
+    mov ax, 0x0211
     mov cx, 2
     xor dh, dh
+    int 0x13
+    pop dx
+    jc disk_error
+
+    xor ax, ax
+    mov es, ax
+    mov bx, 0xa000
+    mov ax, 0x0212
+    mov cx, 1
+    mov dh, 1
     int 0x13
     jc disk_error
     jmp stage2

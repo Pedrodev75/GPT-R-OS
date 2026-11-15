@@ -16,6 +16,7 @@ enum {
 static unsigned char pages[PAGE_COUNT];
 static unsigned int free_count;
 static unsigned int managed_count;
+static unsigned int search_end;
 
 static int range_is_usable(const volatile struct e820_map* map,
     unsigned long long address, unsigned int size)
@@ -65,19 +66,22 @@ void pages_init(const volatile struct e820_map* map)
         free_count += pages[i] == FREE;
     }
     managed_count = free_count;
+    search_end = PAGE_COUNT;
     unsigned long long cr3;
     __asm__ volatile ("mov %%cr3, %0; mov %0, %%cr3" : "=&r"(cr3) : : "memory");
 }
 
 void* page_alloc(void)
 {
-    for (unsigned int i = PAGE_COUNT; i-- > 0;) {
+    for (unsigned int i = search_end; i-- > 0;) {
         if (pages[i] == FREE) {
             pages[i] = ALLOCATED;
+            search_end = i;
             --free_count;
             return (void*)(unsigned long long)(FIRST_ADDRESS + i * PAGE_SIZE);
         }
     }
+    search_end = 0;
     return 0;
 }
 
@@ -91,6 +95,8 @@ int page_free(void* page)
     if (pages[index] != ALLOCATED)
         return 0;
     pages[index] = FREE;
+    if (index >= search_end)
+        search_end = index + 1;
     ++free_count;
     return 1;
 }

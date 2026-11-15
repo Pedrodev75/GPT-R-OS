@@ -4,7 +4,8 @@
 #include "../drivers/keyboard.h"
 #include "../drivers/timer.h"
 
-enum { WIDTH = 80, HEIGHT = 25, TEXT_COLOR = 0x0f00 };
+enum { WIDTH = 80, HEIGHT = 25 };
+static unsigned short text_color;
 static volatile unsigned short* const vga = (volatile unsigned short*)0xb8000;
 
 static void out(unsigned short port, unsigned char value)
@@ -29,7 +30,7 @@ static void move_cursor(unsigned int row, unsigned int col)
 static void clear_row(unsigned int row)
 {
     for (unsigned int col = 0; col < WIDTH; ++col)
-        vga[row * WIDTH + col] = TEXT_COLOR | ' ';
+        vga[row * WIDTH + col] = text_color | ' ';
 }
 
 enum { FIRST_ROW = 2, PROMPT_WIDTH = 2, MAX_INPUT = WIDTH - PROMPT_WIDTH };
@@ -49,7 +50,7 @@ static void print_line(unsigned int* row, const char* text)
 {
     unsigned int col = 0;
     while (*text)
-        vga[*row * WIDTH + col++] = TEXT_COLOR | (unsigned char)*text++;
+        vga[*row * WIDTH + col++] = text_color | (unsigned char)*text++;
     next_row(row);
 }
 
@@ -214,6 +215,116 @@ static void peek(unsigned int* row, const unsigned char* argument)
     print_line(row, line);
 }
 
+static unsigned int color_index(const unsigned char** argument)
+{
+    const unsigned char* text = *argument;
+    while (*text == ' ')
+        ++text;
+    if (*text < '0' || *text > '9')
+        return 256;
+    unsigned int value = 0;
+    do {
+        value = value * 10 + (*text++ - '0');
+        if (value > 15)
+            return 256;
+    } while (*text >= '0' && *text <= '9');
+
+    if (*text && *text != ' ')
+        return 256;
+    *argument = text;
+    return value;
+}
+
+static void change_color(unsigned int* row, const unsigned char* argument)
+{
+    const unsigned int foreground = color_index(&argument);
+    const unsigned int background = color_index(&argument);
+    if (foreground > 15 || background > 7 || *argument) {
+        print_line(row, "Uso: color <frente 0-15> <fundo 0-7>");
+        return;
+    }
+
+    text_color = (background << 12) | (foreground << 8);
+    for (unsigned int i = FIRST_ROW * WIDTH; i < HEIGHT * WIDTH; ++i)
+        vga[i] = text_color | (vga[i] & 0xff);
+}
+
+static void exhaust_pages(unsigned int* row)
+{
+    const unsigned int initial = pages_free_count();
+    void** head = 0;
+    void** page;
+    unsigned int count = 0;
+    /* Chain the test pages themselves so only those pages are freed. */
+    while ((page = page_alloc())) {
+        *page = head;
+        head = page;
+        ++count;
+    }
+    print_number(row, "Paginas alocadas ate esgotar: ", count, "");
+    while (head) {
+        page = head;
+        head = *page;
+        if (!page_free(page)) {
+            print_line(row, "crash alloc: falha ao liberar pagina");
+            return;
+        }
+    }
+    if (count == initial && pages_free_count() == initial)
+        print_line(row, "Alocador retornou NULL. Contagem restaurada.");
+    else
+        print_line(row, "crash alloc: contagem inesperada");
+}
+
+static void crash_test(unsigned int* row, const unsigned char* type)
+{
+    while (*type == ' ')
+        ++type;
+    if (equals(type, "ud")) {
+        __asm__ volatile ("ud2");
+    }
+    else if (equals(type, "div")) {
+        __asm__ volatile ("xor %%ecx, %%ecx; xor %%edx, %%edx; "
+            "mov $1, %%eax; div %%ecx"
+            : : : "rax", "rcx", "rdx", "cc");
+    }
+    else if (equals(type, "pf")) {
+        __asm__ volatile ("movb (%0), %%al" : : "r"(0x40000000ull) : "rax", "memory");
+    }
+    else if (equals(type, "gp")) {
+        /* Noncanonical in both 48-bit and 57-bit address modes. */
+        __asm__ volatile ("movb (%0), %%al" : : "r"(0x8000000000000000ull)
+            : "rax", "memory");
+    }
+    else if (equals(type, "int3")) {
+        __asm__ volatile ("int3");
+    }
+    else if (equals(type, "alloc")) {
+        exhaust_pages(row);
+    }
+    else if (equals(type, "hang")) {
+        __asm__ volatile ("cli; 1: pause; jmp 1b" : : : "memory");
+        __builtin_unreachable();
+    }
+    else if (equals(type, "triple")) {
+        const unsigned char empty_idtr[10] = { 0 };
+        __asm__ volatile ("cli; lidt %0; ud2" : : "m"(empty_idtr) : "memory");
+        __builtin_unreachable();
+    }
+    else {
+        print_line(row, "Uso: crash <ud|div|pf|gp|int3|alloc|hang|triple>");
+    }
+}
+
+static const unsigned char* argument_for(const unsigned char* input, const char* name)
+{
+    while (*name && *input == (unsigned char)*name) {
+        ++input;
+        ++name;
+    }
+    return !*name && (!*input || *input == ' ') ? input : 0;
+}
+
 static void execute(unsigned int* row, unsigned char* line, unsigned int length)
 {
     while (length && *line == ' ') {
@@ -224,6 +335,7 @@ static void execute(unsigned int* row, unsigned char* line, unsigned int length)
         --length;
     line[length] = 0;
 
+    const unsigned char* argument;
     if (equals(line, "help")) {
         print_line(row, "help     Lista os comandos");
         print_line(row, "clear    Limpa o terminal");
@@ -232,6 +344,9 @@ static void execute(unsigned int* row, unsigned char* line, unsigned int length)
         print_line(row, "mem      Mostra o mapa e o uso da memoria");
         print_line(row, "memtest  Testa uma pagina de 4 KiB");
         print_line(row, "peek     Le 16 bytes de um endereco hexadecimal");
+        print_line(row, "reboot   Reinicia o sistema");
+        print_line(row, "color    Muda as cores do terminal");
+        print_line(row, "crash    Executa testes de erro e de limite");
     }
     else if (equals(line, "clear")) {
         for (unsigned int i = FIRST_ROW; i < HEIGHT; ++i)
@@ -239,7 +354,7 @@ static void execute(unsigned int* row, unsigned char* line, unsigned int length)
         *row = FIRST_ROW;
     }
     else if (equals(line, "version")) {
-        print_line(row, "GPT-R OS v0.2.5");
+        print_line(row, "GPT-R OS v0.3.0");
     }
     else if (equals(line, "uptime")) {
         print_number(row, "", timer_uptime_seconds(), " s");
@@ -250,10 +365,20 @@ static void execute(unsigned int* row, unsigned char* line, unsigned int length)
     else if (equals(line, "memtest")) {
         test_memory(row);
     }
-    else if (length >= 4 && line[0] == 'p' && line[1] == 'e' &&
-        line[2] == 'e' && line[3] == 'k' &&
-        (line[4] == 0 || line[4] == ' ')) {
-        peek(row, line + 4);
+    else if ((argument = argument_for(line, "peek"))) {
+        peek(row, argument);
+    }
+    else if (equals(line, "reboot")) {
+        /* System reset control on the QEMU PC chipset. */
+        out(0xcf9, 0x02);
+        out(0xcf9, 0x06);
+        print_line(row, "reboot: controlador nao reiniciou");
+    }
+    else if ((argument = argument_for(line, "color"))) {
+        change_color(row, argument);
+    }
+    else if ((argument = argument_for(line, "crash"))) {
+        crash_test(row, argument);
     }
     else if (length) {
         print_line(row, "Comando desconhecido");
@@ -265,10 +390,11 @@ _Noreturn void shell_run(void)
     struct keyboard_state keyboard = { 0 };
     unsigned char line[MAX_INPUT + 1];
     unsigned int row = FIRST_ROW;
+    text_color = 0x0f00;
 
     for (;;) {
         unsigned int length = 0;
-        vga[row * WIDTH] = TEXT_COLOR | '>';
+        vga[row * WIDTH] = text_color | '>';
         for (;;) {
             const unsigned int col = PROMPT_WIDTH + length;
             move_cursor(row, col < WIDTH ? col : WIDTH - 1);
@@ -277,11 +403,11 @@ _Noreturn void shell_run(void)
                 break;
             if (ch == '\b') {
                 if (length)
-                    vga[row * WIDTH + PROMPT_WIDTH + --length] = TEXT_COLOR | ' ';
+                    vga[row * WIDTH + PROMPT_WIDTH + --length] = text_color | ' ';
             }
             else if (length < MAX_INPUT) {
                 line[length++] = ch;
-                vga[row * WIDTH + col] = TEXT_COLOR | ch;
+                vga[row * WIDTH + col] = text_color | ch;
             }
         }
         next_row(&row);
