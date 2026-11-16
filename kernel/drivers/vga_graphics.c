@@ -2,6 +2,7 @@
 #include "keyboard.h"
 #include "timer.h"
 #include "../memory/pages.h"
+#include "../apps/app.h"
 
 enum {
     WIDTH = VGA_GRAPHICS_WIDTH,
@@ -723,7 +724,9 @@ void vga_graphics_demo(struct keyboard_state* keyboard)
         else if (animate) {
             rect(x, y, SQUARE, SQUARE, colors[color]);
         }
-        if (!key)
+        if (app_ready())
+            app_schedule();
+        else if (!key)
             __asm__ volatile ("hlt" : : : "memory");
     }
 }

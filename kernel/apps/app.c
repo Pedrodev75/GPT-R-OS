@@ -1,5 +1,6 @@
 #include "app.h"
 #include "../memory/pages.h"
+#include "../drivers/keyboard.h"
 
 enum {
     USER_IMAGE = 0x80000000u,
@@ -20,7 +21,17 @@ struct task_state {
 _Static_assert(sizeof(struct task_state) == 104, "Invalid x86-64 TSS size");
 
 extern unsigned long long app_tss_descriptor[2];
-extern void app_enter(unsigned long long entry, unsigned long long stack_top);
+/* Register order shared with app_entry.S. */
+struct app_frame {
+    unsigned long long rax, rbx, rcx, rdx, rsi, rdi, rbp;
+    unsigned long long r8, r9, r10, r11, r12, r13, r14, r15;
+    unsigned long long rip, cs, flags, rsp, ss;
+};
+
+_Static_assert(sizeof(struct app_frame) == 160, "Invalid app context size");
+_Static_assert(__builtin_offsetof(struct app_frame, cs) == 128, "Invalid app frame");
+
+extern void app_enter(const struct app_frame *frame);
 extern _Noreturn void app_leave(void);
 
 static struct task_state tss;
@@ -28,14 +39,23 @@ static unsigned char interrupt_stack[2 * PAGE_SIZE] __attribute__((aligned(16)))
 static unsigned long long directory[512] __attribute__((aligned(PAGE_SIZE)));
 static unsigned long long table[512] __attribute__((aligned(PAGE_SIZE)));
 static unsigned long long stack_page_flags;
-static volatile int interrupt_pending;
 
-static struct {
-    int active;
-    unsigned int image_size;
+enum process_state { UNUSED, READY, WAITING, FINISHED };
+
+struct process {
+    struct app_frame frame;
+    unsigned char fpu[512] __attribute__((aligned(16)));
+    enum process_state state;
+    unsigned char *image, *stack;
+    unsigned int image_size, read_offset, read_capacity;
+    void (*output)(void *, const unsigned char *, unsigned int);
+    void *context;
     struct app_result result;
-    const struct app_launch *launch;
-} running;
+};
+
+static struct process processes[APP_PROCESS_LIMIT];
+static struct process *running;
+static unsigned int next_slot;
 
 static unsigned long long enable_nx(void)
 {
@@ -62,9 +82,21 @@ void app_init(void)
         ((base & 0x00ffffffull) << 16) | ((base & 0xff000000ull) << 32);
     app_tss_descriptor[1] = base >> 32;
     __asm__ volatile ("ltr %w0" : : "r"((unsigned short)0x28) : "memory");
-    running.active = 0;
-    interrupt_pending = 0;
+    running = 0;
+    next_slot = 0;
+    for (unsigned int i = 0; i < APP_PROCESS_LIMIT; ++i)
+        processes[i].state = UNUSED;
+    for (unsigned int i = 0; i < 512; ++i)
+        directory[i] = table[i] = 0;
+    directory[0] = (unsigned long long)table | PRESENT | WRITABLE | USER;
     stack_page_flags = PRESENT | WRITABLE | USER | enable_nx();
+
+    /* All supported x86-64 CPUs have FXSAVE and SSE2. Kernel code uses only GPRs. */
+    unsigned long long cr0, cr4;
+    __asm__ volatile ("mov %%cr0, %0; mov %%cr4, %1" : "=r"(cr0), "=r"(cr4));
+    cr0 = (cr0 & ~0x0cull) | 0x22;
+    cr4 |= (1ull << 9) | (1ull << 10);
+    __asm__ volatile ("mov %0, %%cr0; mov %1, %%cr4" : : "r"(cr0), "r"(cr4) : "memory");
 }
 
 struct image_reader {
@@ -177,52 +209,54 @@ static unsigned long long build_user_stack(unsigned char *stack,
     return copied == launch->args_size ? USER_STACK + frame_at : 0;
 }
 
-static struct app_result execute_image(void *image, void *stack, unsigned int size,
-    unsigned int entry, unsigned long long user_rsp, const struct app_launch *launch)
+static void release_pages(struct process *process)
+{
+    if (process->image) {
+        page_free(process->stack);
+        page_free(process->image);
+        process->stack = process->image = 0;
+    }
+}
+
+static void dispatch(struct process *process)
 {
     volatile unsigned long long *const pml4 = (void *)0x1000;
     volatile unsigned long long *const pdpt = (void *)0x2000;
     unsigned long long flags;
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
 
-    for (unsigned int i = 0; i < 512; ++i) {
-        directory[i] = 0;
-        table[i] = 0;
-    }
-    directory[0] = (unsigned long long)table | PRESENT | WRITABLE | USER;
-    table[0] = (unsigned long long)image | PRESENT | USER;
-    table[2] = (unsigned long long)stack | stack_page_flags;
-    /* Only the app PDPT branch receives user permissions. Leave the guard PTE absent. */
+    /* Only this process's two leaf mappings are user-accessible. */
+    table[0] = (unsigned long long)process->image | PRESENT | USER;
+    table[2] = (unsigned long long)process->stack | stack_page_flags;
     pml4[0] |= USER;
     pdpt[USER_PDPT_SLOT] = (unsigned long long)directory | PRESENT | WRITABLE | USER;
     flush_tlb();
 
-    running.image_size = size;
-    running.launch = launch;
-    interrupt_pending = 0;
-    running.active = 1;
-    app_enter(USER_IMAGE + entry, user_rsp);
+    running = process;
+    __asm__ volatile ("fxrstor64 %0" : : "m"(process->fpu) : "memory");
+    app_enter(&process->frame);
+    __asm__ volatile ("fxsave64 %0" : "=m"(process->fpu) : : "memory");
+    running = 0;
 
-    running.active = 0;
-    interrupt_pending = 0;
     pdpt[USER_PDPT_SLOT] = 0;
     pml4[0] &= ~(unsigned long long)USER;
     flush_tlb();
-    page_free(stack);
-    page_free(image);
-    const struct app_result result = running.result;
     __asm__ volatile ("push %0; popfq" : : "r"(flags) : "cc", "memory");
-    return result;
+    if (process->state == FINISHED)
+        release_pages(process);
 }
 
-struct app_result app_run(const struct fat16_volume *volume,
+enum app_status app_start(unsigned int slot, const struct fat16_volume *volume,
     const struct fat16_file *file, const struct app_launch *launch)
 {
+    struct process *process = &processes[slot];
+    if (process->state != UNUSED)
+        return APP_LIMIT;
     if (file->size <= APP_HEADER_SIZE || file->size > APP_HEADER_SIZE + APP_IMAGE_LIMIT)
-        return (struct app_result){ .status = APP_INVALID };
+        return APP_INVALID;
     unsigned char *image = page_alloc();
     if (!image)
-        return (struct app_result){ .status = APP_NO_MEMORY };
+        return APP_NO_MEMORY;
 
     for (unsigned int i = 0; i < PAGE_SIZE; ++i)
         image[i] = 0;
@@ -235,8 +269,20 @@ struct app_result app_run(const struct fat16_volume *volume,
             for (unsigned int i = 0; i < PAGE_SIZE; ++i)
                 stack[i] = 0;
             const unsigned long long rsp = build_user_stack(stack, launch);
-            if (rsp)
-                return execute_image(image, stack, info.image_size, info.entry, rsp, launch);
+            if (rsp) {
+                *process = (struct process){
+                    .frame = { .rip = USER_IMAGE + info.entry, .cs = 0x23,
+                        .flags = 0x202, .rsp = rsp, .ss = 0x1b },
+                    .state = READY, .image = image, .stack = stack, .image_size = info.image_size,
+                    .output = launch->output, .context = launch->context
+                };
+                /* FXSAVE layout: x87 control word 0x037f, MXCSR 0x1f80. */
+                process->fpu[0] = 0x7f;
+                process->fpu[1] = 0x03;
+                process->fpu[24] = 0x80;
+                process->fpu[25] = 0x1f;
+                return APP_STARTED;
+            }
             page_free(stack);
             failure = APP_BAD_ARGS;
         } else {
@@ -244,7 +290,27 @@ struct app_result app_run(const struct fat16_volume *volume,
         }
     }
     page_free(image);
-    return (struct app_result){ .status = failure };
+    return failure;
+}
+
+int app_ready(void)
+{
+    for (unsigned int i = 0; i < APP_PROCESS_LIMIT; ++i)
+        if (processes[i].state == READY)
+            return 1;
+    return 0;
+}
+
+void app_schedule(void)
+{
+    for (unsigned int i = 0; i < APP_PROCESS_LIMIT; ++i) {
+        const unsigned int slot = (next_slot + i) % APP_PROCESS_LIMIT;
+        if (processes[slot].state == READY) {
+            next_slot = (slot + 1) % APP_PROCESS_LIMIT;
+            dispatch(&processes[slot]);
+            return;
+        }
+    }
 }
 
 static int contains(unsigned long long address, unsigned long long length,
@@ -253,65 +319,133 @@ static int contains(unsigned long long address, unsigned long long length,
     return address >= start && length <= size && address - start <= size - length;
 }
 
-static _Noreturn void finish_interrupted(void)
+static _Noreturn void finish(struct app_result result)
 {
-    running.result = (struct app_result){ .status = APP_INTERRUPTED };
+    running->result = result;
+    running->state = FINISHED;
     app_leave();
 }
 
-void app_interrupt(unsigned long long cs)
+void app_preempt(const struct app_frame *frame)
 {
-    if (!running.active)
-        return;
-    if ((cs & 3) == 3)
-        finish_interrupted();
-    /* An IRQ inside read wakes the keyboard wait before we unwind the syscall. */
-    interrupt_pending = 1;
-}
-
-int app_interrupt_pending(void)
-{
-    return interrupt_pending;
-}
-
-long long app_syscall(unsigned long long number, unsigned long long argument,
-    unsigned long long length, unsigned long long cs)
-{
-    if (!running.active || (cs & 3) != 3)
-        return -1;
-    if (number == 2) {
-        running.result = (struct app_result){ .status = APP_EXITED, .exit_code = argument };
+    if (running && (frame->cs & 3) == 3) {
+        running->frame = *frame;
         app_leave();
     }
+}
+
+void app_syscall(struct app_frame *frame)
+{
+    const unsigned long long number = frame->rax;
+    const unsigned long long argument = frame->rdi;
+    const unsigned long long length = frame->rsi;
+    frame->rax = -1;
+    if (!running || (frame->cs & 3) != 3)
+        return;
+    if (number == 2)
+        finish((struct app_result){ .status = APP_EXITED, .exit_code = argument });
     if (number != 1 && number != 3)
-        return -1;
-    if (length == 0)
-        return 0;
+        return;
+    if (!length) {
+        frame->rax = 0;
+        return;
+    }
+
     const int in_stack = contains(argument, length, USER_STACK, PAGE_SIZE);
-    const struct app_launch *launch = running.launch;
     if (number == 3) {
         if (!in_stack)
-            return -1;
-        const unsigned int count =
-            launch->input(launch->context, (unsigned char *)argument, (unsigned int)length);
-        __asm__ volatile ("cli" : : : "memory");
-        if (interrupt_pending)
-            finish_interrupted();
-        return count;
+            return;
+        running->read_offset = argument - USER_STACK;
+        running->read_capacity = length;
+        running->frame = *frame;
+        running->state = WAITING;
+        app_leave();
     }
-    if (!in_stack && !contains(argument, length, USER_IMAGE, running.image_size))
-        return -1;
-    launch->output(launch->context, (const unsigned char *)argument, (unsigned int)length);
-    return (long long)length;
+    if (!in_stack && !contains(argument, length, USER_IMAGE, running->image_size))
+        return;
+
+    running->output(running->context, (const unsigned char *)argument, length);
+    frame->rax = length;
 }
+
+unsigned int app_read_capacity(unsigned int slot)
+{
+    const struct process *process = &processes[slot];
+    return process->state == WAITING ? process->read_capacity : 0;
+}
+
+void app_complete_read(unsigned int slot, const unsigned char *bytes, unsigned int count)
+{
+    struct process *process = &processes[slot];
+    if (process->state != WAITING || count >= process->read_capacity)
+        return;
+    unsigned char *buffer = process->stack + process->read_offset;
+    for (unsigned int i = 0; i < count; ++i)
+        buffer[i] = bytes[i];
+    buffer[count] = 0;
+    process->frame.rax = count;
+    process->state = READY;
+}
+
+void app_cancel(unsigned int slot)
+{
+    struct process *process = &processes[slot];
+    if (process->state == READY || process->state == WAITING) {
+        process->result = (struct app_result){ .status = APP_INTERRUPTED };
+        process->state = FINISHED;
+        release_pages(process);
+    }
+}
+
+int app_take_result(unsigned int slot, struct app_result *result)
+{
+    struct process *process = &processes[slot];
+    if (process->state != FINISHED)
+        return 0;
+    *result = process->result;
+    process->state = UNUSED;
+    return 1;
+}
+
+void app_release(unsigned int slot)
+{
+    app_cancel(slot);
+    processes[slot].state = UNUSED;
+}
+
+#ifndef GPT_R_GRAPHICS
+struct app_result app_run(const struct fat16_volume *volume,
+    const struct fat16_file *file, const struct app_launch *launch)
+{
+    const enum app_status status = app_start(0, volume, file, launch);
+    if (status != APP_STARTED)
+        return (struct app_result){ .status = status };
+    struct process *process = &processes[0];
+    struct app_result result;
+    while (!app_take_result(0, &result)) {
+        if (keyboard_take_interrupt()) {
+            app_cancel(0);
+        } else if (process->state == WAITING) {
+            unsigned char *buffer = process->stack + process->read_offset;
+            const unsigned int count = launch->input(launch->context, buffer,
+                process->read_capacity);
+            if (count >= process->read_capacity)
+                app_cancel(0);
+            else
+                app_complete_read(0, buffer, count);
+        } else {
+            app_schedule();
+        }
+    }
+    return result;
+}
+#endif
 
 void app_handle_exception(unsigned long long cs, unsigned long long vector,
     unsigned long long rip, unsigned long long fault_address)
 {
     /* CPU-wide failures retain the kernel's diagnostic path. */
-    if (running.active && (cs & 3) == 3 && vector != 2 && vector != 8 && vector != 18) {
-        running.result = (struct app_result){ .status = APP_FAULTED,
-            .vector = vector, .rip = rip, .fault_address = fault_address };
-        app_leave();
-    }
+    if (running && (cs & 3) == 3 && vector != 2 && vector != 8 && vector != 18)
+        finish((struct app_result){ .status = APP_FAULTED,
+            .vector = vector, .rip = rip, .fault_address = fault_address });
 }

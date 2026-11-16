@@ -1,4 +1,6 @@
 #include "desktop.h"
+#include "app_window.h"
+#include "../drivers/timer.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/mouse.h"
 #include "../shell/shell_internal.h"
@@ -10,10 +12,11 @@ enum {
     CELL = VGA_OVERLAY_CELL_WIDTH, BAR_HEIGHT = 52, BAR_Y = SCREEN_HEIGHT - BAR_HEIGHT,
     MENU_X = 14, MENU_WIDTH = 300, MENU_HEIGHT = 176, MENU_Y = BAR_Y - MENU_HEIGHT - 8,
     WORKSPACE = 0x101c30, PANEL = 0x142338, ACTIVE = 0x1c3850, BORDER = 0x364e6a,
-    SHADOW = 0x080e19, INK = 0xe7eef8, MUTED = 0x91a8c1, ACCENT = 0x61dcf5
+    SHADOW = 0x080e19, INK = 0xe7eef8, MUTED = 0x91a8c1, ACCENT = 0x61dcf5,
+    APP_TAB_X = 533, APP_TAB_STEP = 119, APP_TAB_WIDTH = 110
 };
 
-enum window_id { TERMINAL, EDITOR, NO_WINDOW };
+enum window_id { TERMINAL, EDITOR, FIRST_APP, NO_WINDOW = FIRST_APP + APP_PROCESS_LIMIT };
 
 struct window {
     unsigned int x, y, width, height;
@@ -21,7 +24,11 @@ struct window {
     int open, minimized;
 };
 
-static struct window windows[2];
+static struct window windows[NO_WINDOW];
+static enum window_id window_order[NO_WINDOW];
+static char app_titles[APP_PROCESS_LIMIT][sizeof(((struct fat16_file *)0)->name)];
+static unsigned int last_app_paint, pending_app_paint[APP_PROCESS_LIMIT];
+static unsigned int events_since_slice;
 static enum window_id focus, menu_choice, dragging;
 static int menu_open;
 static unsigned int pointer_x, pointer_y, drag_dx, drag_dy, buttons;
@@ -85,7 +92,7 @@ static void draw_window(const struct window *window, int focused, const unsigned
     vga_graphics_fill(x + 1, y + 1, width - 2, height - 2, PANEL);
     vga_graphics_fill(x + 2, y + 2, width - 4, DESKTOP_TITLE_HEIGHT - 3,
         focused ? ACTIVE : PANEL);
-    if (window == &windows[TERMINAL])
+    if (window != &windows[EDITOR])
         terminal_icon(x + 12, y + 9, focused ? ACCENT : MUTED);
     else
         editor_icon(x + 12, y + 9, ACCENT);
@@ -122,7 +129,24 @@ static void draw_taskbar(void)
         if (focus == EDITOR && !menu_open)
             vga_graphics_fill(371, top + 35, 152, 3, ACCENT);
     }
-    text(SCREEN_WIDTH - 213, top + 8, "F2 / Alt+Tab", MUTED);
+    for (unsigned int slot = 0; slot < APP_PROCESS_LIMIT; ++slot) {
+        const enum window_id id = FIRST_APP + slot;
+        if (!windows[id].open)
+            continue;
+        const unsigned int left = APP_TAB_X + slot * APP_TAB_STEP;
+        const int focused = focus == id && !menu_open;
+        char label[7];
+        unsigned int length = 0;
+        while (length + 1 < sizeof(label) && app_titles[slot][length]) {
+            label[length] = app_titles[slot][length];
+            ++length;
+        }
+        label[length] = 0;
+        vga_graphics_fill(left, top, APP_TAB_WIDTH, 38, focused ? ACTIVE : WORKSPACE);
+        text(left + 7, top + 8, label, INK);
+        if (focused)
+            vga_graphics_fill(left, top + 35, APP_TAB_WIDTH, 3, ACCENT);
+    }
 }
 
 static void draw_menu_items(enum window_id choice)
@@ -196,8 +220,11 @@ static void paint_app(enum window_id id, struct region damage)
     if (id == TERMINAL) {
         vga_graphics_place_console(x, y);
         vga_graphics_snapshot_console();
-    } else {
+    } else if (id == EDITOR) {
         shell_editor_draw(x, y, 1);
+    } else {
+        app_window_draw(id - FIRST_APP, x, y, focus == id && !menu_open,
+            damage.y, damage.height);
     }
 }
 
@@ -205,12 +232,8 @@ static void compose_region(struct region damage)
 {
     vga_graphics_clip(damage.x, damage.y, damage.width, damage.height);
     desktop_background();
-    if (focus != TERMINAL)
-        paint_app(TERMINAL, damage);
-    if (focus != EDITOR)
-        paint_app(EDITOR, damage);
-    if (focus != NO_WINDOW)
-        paint_app(focus, damage);
+    for (unsigned int i = 0; i < NO_WINDOW; ++i)
+        paint_app(window_order[i], damage);
     if (intersects(damage, (struct region){0, BAR_Y, SCREEN_WIDTH, BAR_HEIGHT}))
         draw_taskbar();
     if (menu_open && intersects(damage,
@@ -235,12 +258,20 @@ static void present_scene(void)
 
 static unsigned int visibility(void)
 {
-    return visible(TERMINAL) | (visible(EDITOR) << 1);
+    unsigned int mask = 0;
+    for (unsigned int id = 0; id < NO_WINDOW; ++id)
+        if (visible(id))
+            mask |= 1u << id;
+    return mask;
 }
 
 static unsigned int opened_windows(void)
 {
-    return windows[TERMINAL].open | (windows[EDITOR].open << 1);
+    unsigned int mask = 0;
+    for (unsigned int id = 0; id < NO_WINDOW; ++id)
+        if (windows[id].open)
+            mask |= 1u << id;
+    return mask;
 }
 
 static void remember_scene(void)
@@ -251,21 +282,67 @@ static void remember_scene(void)
     painted_menu = menu_open;
 }
 
-static void recompose_overlap(void)
+static void recompose_overlap(enum window_id id)
 {
-    const struct region terminal = window_region(TERMINAL);
-    const struct region editor = window_region(EDITOR);
-    if (!intersects(terminal, editor))
-        return;
-    const unsigned int left = terminal.x > editor.x ? terminal.x : editor.x;
-    const unsigned int top = terminal.y > editor.y ? terminal.y : editor.y;
-    unsigned int right = terminal.x + terminal.width;
-    unsigned int bottom = terminal.y + terminal.height;
-    if (editor.x + editor.width < right)
-        right = editor.x + editor.width;
-    if (editor.y + editor.height < bottom)
-        bottom = editor.y + editor.height;
-    compose_region((struct region){left, top, right - left, bottom - top});
+    const struct region raised = window_region(id);
+    unsigned int left = SCREEN_WIDTH, top = SCREEN_HEIGHT, right = 0, bottom = 0;
+    for (unsigned int other = 0; other < NO_WINDOW; ++other) {
+        if (other == id || !visible(other))
+            continue;
+        const struct region w = window_region(other);
+        if (!intersects(raised, w))
+            continue;
+        const unsigned int x = raised.x > w.x ? raised.x : w.x;
+        const unsigned int y = raised.y > w.y ? raised.y : w.y;
+        const unsigned int edge_x = raised.x + raised.width < w.x + w.width ?
+            raised.x + raised.width : w.x + w.width;
+        const unsigned int edge_y = raised.y + raised.height < w.y + w.height ?
+            raised.y + raised.height : w.y + w.height;
+        if (x < left)
+            left = x;
+        if (y < top)
+            top = y;
+        if (edge_x > right)
+            right = edge_x;
+        if (edge_y > bottom)
+            bottom = edge_y;
+    }
+    if (left < right)
+        compose_region((struct region){left, top, right - left, bottom - top});
+}
+
+static void repaint_app_output(int immediate)
+{
+    int repainting = 0;
+    const unsigned int tick = timer_ticks();
+    const int ready_to_paint = immediate || tick - last_app_paint >= 3;
+    for (unsigned int slot = 0; slot < APP_PROCESS_LIMIT; ++slot) {
+        const enum window_id id = FIRST_APP + slot;
+        app_window_update(slot);
+        pending_app_paint[slot] |= app_window_dirty(slot);
+        if (!visible(id)) {
+            pending_app_paint[slot] = 0;
+            continue;
+        }
+        const unsigned int mask = pending_app_paint[slot];
+        if (!mask || !ready_to_paint)
+            continue;
+        pending_app_paint[slot] = 0;
+        const unsigned int first = __builtin_ctz(mask);
+        const unsigned int last = sizeof(mask) * 8 - 1 - __builtin_clz(mask);
+        if (!repainting) {
+            begin_scene();
+            repainting = 1;
+        }
+        const struct window *w = &windows[id];
+        compose_region((struct region){w->x + DESKTOP_FRAME,
+            w->y + DESKTOP_TITLE_HEIGHT + first * VGA_LINE_HEIGHT,
+            w->width, (last + 1 - first) * VGA_LINE_HEIGHT});
+    }
+    if (repainting) {
+        present_scene();
+        last_app_paint = tick;
+    }
 }
 
 static void repaint_changed(int editor_content)
@@ -279,7 +356,7 @@ static void repaint_changed(int editor_content)
         return;
 
     begin_scene();
-    for (unsigned int id = 0; id < 2; ++id) {
+    for (unsigned int id = 0; id < NO_WINDOW; ++id) {
         if ((changed & (1u << id)) || (editor_content && id == EDITOR)) {
             compose_region(window_region(id));
         } else if (focus_changed && visible(id) && (id == painted_focus || id == focus)) {
@@ -293,12 +370,18 @@ static void repaint_changed(int editor_content)
             compose_region((struct region){x, y + height - 1, width, 1});
         }
     }
-    if (focus_changed && !editor_content && now_visible == 3 && painted_visible == 3)
-        recompose_overlap();
+    if (focus_changed && visible(focus) && !(changed & (1u << focus)))
+        recompose_overlap(focus);
+    if (focus_changed || menu_changed) {
+        if (visible(painted_focus) && painted_focus >= FIRST_APP)
+            app_window_focus(painted_focus - FIRST_APP);
+        if (visible(focus) && focus >= FIRST_APP)
+            app_window_focus(focus - FIRST_APP);
+    }
     if (menu_changed)
         compose_region((struct region){MENU_X, MENU_Y, MENU_WIDTH + 6, MENU_HEIGHT + 6});
     if (taskbar_changed)
-        compose_region((struct region){14, BAR_Y + 7, 510, 38});
+        compose_region((struct region){14, BAR_Y + 7, SCREEN_WIDTH - 14, 38});
     present_scene();
     remember_scene();
 }
@@ -321,6 +404,15 @@ void desktop_init(void)
         DESKTOP_EDITOR_X, DESKTOP_EDITOR_Y,
         DESKTOP_EDITOR_WIDTH, DESKTOP_EDITOR_HEIGHT, "Editor", 0, 0
     };
+    for (unsigned int i = 0; i < NO_WINDOW; ++i)
+        window_order[i] = i;
+    for (unsigned int slot = 0; slot < APP_PROCESS_LIMIT; ++slot) {
+        windows[FIRST_APP + slot].open = 0;
+        pending_app_paint[slot] = 0;
+        app_window_reset(slot);
+    }
+    last_app_paint = timer_ticks();
+    events_since_slice = 0;
     focus = menu_choice = TERMINAL;
     dragging = NO_WINDOW;
     buttons = menu_open = 0;
@@ -337,13 +429,65 @@ static void cancel_drag(void)
     }
 }
 
+static void raise_window(enum window_id id)
+{
+    unsigned int index = 0;
+    while (window_order[index] != id)
+        ++index;
+    for (; index + 1 < NO_WINDOW; ++index)
+        window_order[index] = window_order[index + 1];
+    window_order[index] = id;
+    focus = id;
+}
+
+static void focus_top_window(void)
+{
+    focus = NO_WINDOW;
+    for (unsigned int i = NO_WINDOW; i; --i) {
+        if (visible(window_order[i - 1])) {
+            focus = window_order[i - 1];
+            return;
+        }
+    }
+}
+
+enum app_status desktop_open_app(const struct fat16_volume *volume, const struct fat16_file *file,
+    struct app_launch *launch)
+{
+    unsigned int slot = 0;
+    while (slot < APP_PROCESS_LIMIT && windows[FIRST_APP + slot].open)
+        ++slot;
+    if (slot == APP_PROCESS_LIMIT)
+        return APP_LIMIT;
+
+    launch->output = app_window_write;
+    launch->context = app_window_context(slot);
+    const enum app_status result = app_start(slot, volume, file, launch);
+    if (result != APP_STARTED)
+        return result;
+
+    app_window_reset(slot);
+    pending_app_paint[slot] = 0;
+    for (unsigned int i = 0; i < sizeof(file->name); ++i)
+        app_titles[slot][i] = file->name[i];
+    const enum window_id id = FIRST_APP + slot;
+    windows[id] = (struct window){
+        272 + slot * 54, 153 + slot * 57, APP_WINDOW_WIDTH, APP_WINDOW_HEIGHT,
+        app_titles[slot], 1, 0
+    };
+    cancel_drag();
+    raise_window(id);
+    repaint_changed(0);
+    return APP_STARTED;
+}
+
 void desktop_open_editor(const unsigned char *name)
 {
     cancel_drag();
     editor_name = name;
     windows[EDITOR].open = 1;
     windows[EDITOR].minimized = 0;
-    focus = EDITOR;
+    raise_window(EDITOR);
     repaint_changed(1);
 }
 
@@ -352,7 +496,7 @@ static void focus_window(enum window_id id)
     windows[id].open = 1;
     windows[id].minimized = 0;
     cancel_drag();
-    focus = id;
+    raise_window(id);
     repaint_changed(0);
 }
 
@@ -367,9 +511,10 @@ static void hide_window(enum window_id id, int close)
     }
     windows[id].open = !close;
     windows[id].minimized = !close;
-    const enum window_id other = id == TERMINAL ? EDITOR : TERMINAL;
+    if (close && id >= FIRST_APP)
+        app_release(id - FIRST_APP);
     if (focus == id)
-        focus = visible(other) ? other : NO_WINDOW;
+        focus_top_window();
     cancel_drag();
     repaint_changed(0);
 }
@@ -425,9 +570,11 @@ static void click(unsigned int *row)
         toggle_menu();
         return;
     }
-    for (unsigned int id = 0; id < 2; ++id) {
-        if (windows[id].open && hit(x, y, id == TERMINAL ? 181 : 371, BAR_Y + 7,
-                                   id == TERMINAL ? 180 : 152, 38)) {
+    for (unsigned int id = 0; id < NO_WINDOW; ++id) {
+        const unsigned int left = id == TERMINAL ? 181 :
+            id == EDITOR ? 371 : APP_TAB_X + (id - FIRST_APP) * APP_TAB_STEP;
+        const unsigned int width = id == TERMINAL ? 180 : id == EDITOR ? 152 : APP_TAB_WIDTH;
+        if (windows[id].open && hit(x, y, left, BAR_Y + 7, width, 38)) {
             if (focus == id)
                 hide_window(id, 0);
             else
@@ -436,15 +583,15 @@ static void click(unsigned int *row)
         }
     }
 
-    enum window_id id = focus;
-    if (!hit_window(id)) {
-        if (hit_window(EDITOR))
-            id = EDITOR;
-        else if (hit_window(TERMINAL))
-            id = TERMINAL;
-        else
-            return;
+    enum window_id id = NO_WINDOW;
+    for (unsigned int i = NO_WINDOW; i; --i) {
+        if (hit_window(window_order[i - 1])) {
+            id = window_order[i - 1];
+            break;
+        }
     }
+    if (id == NO_WINDOW)
+        return;
     struct window *w = &windows[id];
     if (focus != id)
         focus_window(id);
@@ -510,33 +657,59 @@ static void mouse_event(const struct mouse_event *event, unsigned int *row)
     buttons = event->buttons;
 }
 
+static void switch_window(void)
+{
+    const unsigned int start = focus < NO_WINDOW ? focus + 1u : 0u;
+    for (unsigned int offset = 0; offset < NO_WINDOW; ++offset) {
+        const enum window_id id = (start + offset) % NO_WINDOW;
+        if (windows[id].open) {
+            menu_open = 0;
+            focus_window(id);
+            return;
+        }
+    }
+}
+
+static void run_slice(void)
+{
+    events_since_slice = 0;
+    app_schedule();
+    repaint_app_output(0);
+}
+
 unsigned int desktop_wait_key(struct keyboard_state *keyboard, unsigned int *row)
 {
     for (;;) {
         struct mouse_event event;
+        if (events_since_slice >= 8 && app_ready())
+            run_slice();
+
         __asm__ volatile ("cli" : : : "memory");
-        const unsigned int key = keyboard_poll(keyboard);
-        if (!key && mouse_poll(&event)) {
+        if (mouse_poll(&event)) {
             __asm__ volatile ("sti" : : : "memory");
+            ++events_since_slice;
             mouse_event(&event, row);
+            repaint_app_output(0);
             continue;
         }
+        const unsigned int key = keyboard_poll(keyboard);
         if (!key) {
-            __asm__ volatile ("sti; hlt" : : : "memory");
+            if (app_ready()) {
+                __asm__ volatile ("sti" : : : "memory");
+                run_slice();
+            } else {
+                __asm__ volatile ("sti; hlt" : : : "memory");
+                repaint_app_output(0);
+            }
             continue;
         }
         __asm__ volatile ("sti" : : : "memory");
+        ++events_since_slice;
 
         if (key == KEY_F1) {
             toggle_menu();
         } else if (key == KEY_SWITCH_WINDOW) {
-            enum window_id other = focus == EDITOR ? TERMINAL : EDITOR;
-            if (focus == NO_WINDOW && !windows[other].open)
-                other = TERMINAL;
-            if (windows[other].open) {
-                menu_open = 0;
-                focus_window(other);
-            }
+            switch_window();
         } else if (menu_open) {
             if (key == KEY_ESCAPE) {
                 toggle_menu();
@@ -552,7 +725,7 @@ unsigned int desktop_wait_key(struct keyboard_state *keyboard, unsigned int *row
             if (shell_editor_key(key)) {
                 cancel_drag();
                 windows[EDITOR].open = 0;
-                focus = visible(TERMINAL) ? TERMINAL : NO_WINDOW;
+                focus_top_window();
                 repaint_changed(0);
             } else {
                 vga_graphics_begin_frame();
@@ -560,6 +733,9 @@ unsigned int desktop_wait_key(struct keyboard_state *keyboard, unsigned int *row
                     windows[EDITOR].y + DESKTOP_TITLE_HEIGHT, 0);
                 vga_graphics_end_frame();
             }
+        } else if (focus >= FIRST_APP && focus < NO_WINDOW) {
+            app_window_key(focus - FIRST_APP, key);
+            repaint_app_output(1);
         } else if (focus == TERMINAL) {
             if (key == KEY_ESCAPE)
                 hide_window(TERMINAL, 1);

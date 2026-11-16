@@ -1,5 +1,7 @@
 #include "keyboard.h"
+#ifdef GPT_R_GRAPHICS
 #include "../apps/app.h"
+#endif
 
 /* PS/2 scan code set 1, using the BIOS controller's translation. */
 /* ABNT2 scan codes, translated by the PS/2 controller to set 1. */
@@ -43,6 +45,7 @@ enum { QUEUE_MASK = 63 };
 static volatile unsigned short queue[QUEUE_MASK + 1];
 static volatile unsigned int head;
 static volatile unsigned int tail;
+static unsigned int interrupt_key;
 
 static unsigned int ctrl_keys, scan_pause;
 static int scan_extended;
@@ -99,6 +102,13 @@ static enum scan_action receive_byte(unsigned char status)
     /* Recognize Ctrl+C even if a CPU-bound app has filled the input queue. */
     const enum scan_action action = scan_shortcut(byte);
     const unsigned int next = (head + 1) & QUEUE_MASK;
+#ifdef GPT_R_GRAPHICS
+    if (action == INTERRUPT_APP && next != tail) {
+        queue[head] = KEY_INTERRUPT;
+        head = next;
+        return DROP_SCAN;
+    }
+#endif
     if ((action == QUEUE_SCAN || action == SAVE_EDITOR) && next != tail) {
         queue[head] = action == SAVE_EDITOR ? KEY_SAVE : byte;
         head = next;
@@ -110,6 +120,7 @@ int keyboard_irq_init(void)
 {
     head = 0;
     tail = 0;
+    interrupt_key = 0;
     ctrl_keys = scan_pause = 0;
     scan_extended = 0;
     suppressed_shortcuts = 0;
@@ -137,17 +148,27 @@ int keyboard_irq_init(void)
     return status != 0xff && !(status & 1) && !(read_port(0x21) & 2);
 }
 
-void keyboard_irq_handler(unsigned long long cs)
+void keyboard_irq_handler(void)
 {
     const unsigned char status = read_port(0x64);
     const enum scan_action action = (status & 0x21) == 1 ? receive_byte(status) : DROP_SCAN;
     write_port(0x20, 0x20);
     if (action == INTERRUPT_APP)
-        app_interrupt(cs);
+        __atomic_store_n(&interrupt_key, 1, __ATOMIC_RELAXED);
+}
+
+int keyboard_take_interrupt(void)
+{
+    return __atomic_exchange_n(&interrupt_key, 0, __ATOMIC_RELAXED);
 }
 
 unsigned int keyboard_poll(struct keyboard_state *keyboard)
 {
+    if (keyboard_take_interrupt()) {
+        keyboard->accent = 0;
+        keyboard->pending = 0;
+        return KEY_INTERRUPT;
+    }
     if (keyboard->pending) {
         const unsigned char ch = keyboard->pending;
         keyboard->pending = 0;
@@ -157,7 +178,7 @@ unsigned int keyboard_poll(struct keyboard_state *keyboard)
     while (head != tail) {
         const unsigned int key = queue[tail];
         tail = (tail + 1) & QUEUE_MASK;
-        if (key == KEY_SAVE) {
+        if (key == KEY_SAVE || key == KEY_INTERRUPT) {
             keyboard->extended = 0;
             keyboard->pause_bytes = 0;
             keyboard->accent = 0;
@@ -254,14 +275,18 @@ unsigned int keyboard_poll(struct keyboard_state *keyboard)
 unsigned int keyboard_wait(struct keyboard_state *keyboard)
 {
     for (;;) {
-        if (app_interrupt_pending())
-            return KEY_INTERRUPT;
         const unsigned int key = keyboard_poll(keyboard);
         if (key)
             return key;
 
+#ifdef GPT_R_GRAPHICS
+        if (app_ready()) {
+            app_schedule();
+            continue;
+        }
+#endif
         __asm__ volatile ("cli" : : : "memory");
-        if (head == tail && !app_interrupt_pending())
+        if (head == tail && !__atomic_load_n(&interrupt_key, __ATOMIC_RELAXED))
             __asm__ volatile ("sti; hlt" : : : "memory");
         else
             __asm__ volatile ("sti" : : : "memory");

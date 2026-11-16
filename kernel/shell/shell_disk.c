@@ -1,3 +1,4 @@
+#include "../desktop/desktop.h"
 #include "../apps/app.h"
 #include "../drivers/keyboard.h"
 #include "shell_internal.h"
@@ -330,6 +331,7 @@ void shell_cat(unsigned int *row, const unsigned char *argument)
         shell_print_line(row, "Falha ao ler arquivo ou cadeia FAT16");
 }
 
+#ifndef GPT_R_GRAPHICS
 static unsigned int read_app_line(void *context, unsigned char *buffer,
     unsigned int capacity)
 {
@@ -345,7 +347,9 @@ static unsigned int read_app_line(void *context, unsigned char *buffer,
     for (;;) {
         shell_move_cursor(*output->row, output->col);
         const unsigned int key = shell_wait_key();
-        if (key == '\n' || key == KEY_INTERRUPT)
+        if (key == KEY_INTERRUPT)
+            return capacity;
+        if (key == '\n')
             break;
         if (key == '\b' && length) {
             do {
@@ -362,13 +366,12 @@ static unsigned int read_app_line(void *context, unsigned char *buffer,
             }
         }
     }
-#ifdef GPT_R_GRAPHICS
-    vga_graphics_cursor(WIDTH * HEIGHT);
-#endif
     buffer[length] = 0;
     text_next_row(output);
     return length;
 }
+
+#endif
 
 static int pack_arguments(const unsigned char *text, unsigned char *args,
     struct app_launch *launch)
@@ -392,11 +395,8 @@ static int pack_arguments(const unsigned char *text, unsigned char *args,
 
 void shell_run_app(unsigned int *row, const unsigned char *argument)
 {
-    struct text_output output = { .row = row };
     unsigned char args[APP_ARG_BYTES];
-    struct app_launch launch = {
-        .args = args, .output = text_chunk, .input = read_app_line, .context = &output
-    };
+    struct app_launch launch = { .args = args };
     if (!pack_arguments(argument, args, &launch)) {
         shell_print_line(row, "Argumentos demais para run");
         return;
@@ -412,6 +412,14 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
     if (!shell_open_volume(row, &disk, &volume) || !shell_find_file(row, &volume, args, &file))
         return;
 
+#ifdef GPT_R_GRAPHICS
+    const enum app_status status = desktop_open_app(&volume, &file, &launch);
+    switch (status) {
+#else
+    struct text_output output = { .row = row };
+    launch.output = text_chunk;
+    launch.input = read_app_line;
+    launch.context = &output;
     const struct app_result result = app_run(&volume, &file, &launch);
     finish_text(&output);
     switch (result.status) {
@@ -430,21 +438,27 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
         }
         break;
     }
+    case APP_INTERRUPTED:
+        shell_discard_input();
+        shell_print_line(row, "Programa interrompido (Ctrl+C)");
+        break;
+#endif
     case APP_INVALID:
         shell_print_line(row, "Formato APP invalido");
         break;
     case APP_READ_ERROR:
         shell_print_line(row, "Falha ao ler arquivo ou cadeia FAT16");
         break;
-    case APP_INTERRUPTED:
-        shell_discard_input();
-        shell_print_line(row, "Programa interrompido (Ctrl+C)");
-        break;
     case APP_BAD_ARGS:
         shell_print_line(row, "Argumentos invalidos");
         break;
     case APP_NO_MEMORY:
         shell_print_line(row, "Sem memoria para executar o programa");
+        break;
+    case APP_LIMIT:
+        shell_print_line(row, "Limite de janelas APP. Feche uma janela.");
+        break;
+    default:
         break;
     }
 }

@@ -2,6 +2,7 @@
 #define GPT_R_KEYBOARD_H
 
 int keyboard_irq_init(void);
+int keyboard_take_interrupt(void);
 
 enum {
     KEY_ESCAPE = 0x1b,

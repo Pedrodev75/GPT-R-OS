@@ -4,7 +4,8 @@
 #include "../fs/fat16.h"
 
 enum app_status {
-    APP_EXITED, APP_FAULTED, APP_INVALID, APP_READ_ERROR, APP_NO_MEMORY, APP_BAD_ARGS, APP_INTERRUPTED
+    APP_EXITED, APP_FAULTED, APP_INVALID, APP_READ_ERROR, APP_NO_MEMORY, APP_BAD_ARGS, APP_INTERRUPTED,
+    APP_STARTED, APP_LIMIT
 };
 
 struct app_result {
@@ -33,8 +34,17 @@ struct app_launch {
 };
 
 void app_init(void);
-void app_interrupt(unsigned long long cs);
-int app_interrupt_pending(void);
+enum { APP_PROCESS_LIMIT = 4 };
+
+enum app_status app_start(unsigned int slot, const struct fat16_volume *volume,
+    const struct fat16_file *file, const struct app_launch *launch);
+int app_ready(void);
+void app_schedule(void);
+unsigned int app_read_capacity(unsigned int slot);
+void app_complete_read(unsigned int slot, const unsigned char *bytes, unsigned int count);
+void app_cancel(unsigned int slot);
+int app_take_result(unsigned int slot, struct app_result *result);
+void app_release(unsigned int slot);
 struct app_result app_run(const struct fat16_volume *volume,
     const struct fat16_file *file, const struct app_launch *launch);
 void app_handle_exception(unsigned long long cs, unsigned long long vector,
