@@ -82,7 +82,7 @@ void shell_appinfo(unsigned int *row, const unsigned char *argument)
 {
     unsigned char name[FAT16_PATH_CAPACITY];
     if (!shell_word(&argument, name, sizeof(name)) || *argument) {
-        shell_print_line(row, "Uso: appinfo <arquivo.APP>");
+        shell_print_error(row, "Uso: appinfo <arquivo.APP>");
         return;
     }
 
@@ -95,7 +95,7 @@ void shell_appinfo(unsigned int *row, const unsigned char *argument)
     struct app_info info;
     const int valid = app_inspect(&volume, &file, &info);
     if (valid <= 0) {
-        shell_print_line(row, valid < 0 ? "Falha ao ler arquivo ou cadeia FAT16" :
+        shell_print_error(row, valid < 0 ? "Falha ao ler arquivo ou cadeia FAT16" :
             "Formato APP invalido");
         return;
     }

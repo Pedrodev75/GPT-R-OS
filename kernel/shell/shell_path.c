@@ -26,20 +26,7 @@ void shell_pwd(unsigned int *row, const unsigned char *argument)
     (void)argument;
     char path[FAT16_PATH_CAPACITY];
     fat16_format_path(&cwd, path);
-    char line[WIDTH + 1];
-    unsigned int used = 0;
-    for (const char *p = path; *p; ++p) {
-        line[used++] = *p;
-        if (used == WIDTH) {
-            line[used] = 0;
-            shell_print_line(row, line);
-            used = 0;
-        }
-    }
-    if (used) {
-        line[used] = 0;
-        shell_print_line(row, line);
-    }
+    shell_print_line(row, path);
 }
 
 void shell_cd(unsigned int *row, const unsigned char *argument)

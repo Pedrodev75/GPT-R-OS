@@ -5,7 +5,7 @@
 
 enum app_status {
     APP_EXITED, APP_FAULTED, APP_INVALID, APP_READ_ERROR, APP_NO_MEMORY, APP_BAD_ARGS, APP_INTERRUPTED,
-    APP_STARTED, APP_LIMIT, APP_SAVE_ERROR
+    APP_STARTED, APP_LIMIT, APP_SAVE_ERROR, APP_OUTPUT_ERROR
 };
 
 struct app_result {
@@ -28,7 +28,7 @@ enum { APP_ARG_LIMIT = 40, APP_ARG_BYTES = 256 };
 struct app_launch {
     const unsigned char *args;
     unsigned int argc, args_size;
-    void (*output)(void *, const unsigned char *, unsigned int);
+    int (*output)(void *, const unsigned char *, unsigned int);
     unsigned int (*input)(void *, unsigned char *, unsigned int);
     void *context;
     const struct fat16_path *directory;

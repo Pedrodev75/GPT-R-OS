@@ -8,7 +8,7 @@ static int open_disk(unsigned int *row, struct ata_disk *disk)
 {
     if (ata_identify(disk))
         return 1;
-    shell_print_line(row, "Disco ATA ausente ou sem resposta");
+    shell_print_error(row, "Disco ATA ausente ou sem resposta");
     return 0;
 }
 
@@ -23,12 +23,12 @@ void shell_diskinfo(unsigned int *row, const unsigned char *argument)
     shell_print_number(row, "Capacidade acessivel: ", (unsigned long long)disk.sectors * 512, " bytes");
     struct fat16_volume volume;
     if (!fat16_mount(&volume, &disk)) {
-        shell_print_line(row, "Volume FAT16 indisponivel");
+        shell_print_error(row, "Volume FAT16 indisponivel");
         return;
     }
     unsigned int total, free;
     if (!fat16_space(&volume, &total, &free)) {
-        shell_print_line(row, "Falha ao ler tabela FAT16");
+        shell_print_error(row, "Falha ao ler tabela FAT16");
         return;
     }
     const unsigned long long cluster_bytes = volume.sectors_per_cluster * 512ull;
@@ -41,7 +41,7 @@ void shell_sector(unsigned int *row, const unsigned char *argument)
     unsigned int lba;
     const int parsed = shell_parse_decimal(argument, &lba);
     if (parsed != 1) {
-        shell_print_line(row, parsed < 0 ? "LBA fora do intervalo" : "Uso: sector <LBA decimal>");
+        shell_print_error(row, parsed < 0 ? "LBA fora do intervalo" : "Uso: sector <LBA decimal>");
         return;
     }
 
@@ -50,11 +50,11 @@ void shell_sector(unsigned int *row, const unsigned char *argument)
     if (!open_disk(row, &disk))
         return;
     if (lba >= disk.sectors) {
-        shell_print_line(row, "LBA fora do disco");
+        shell_print_error(row, "LBA fora do disco");
         return;
     }
     if (!ata_read_sector(&disk, lba, data)) {
-        shell_print_line(row, "Falha ao ler setor ATA");
+        shell_print_error(row, "Falha ao ler setor ATA");
         return;
     }
     shell_print_number(row, "Setor ", lba, " (primeiros 16 bytes)");
@@ -68,7 +68,7 @@ int shell_open_volume(unsigned int *row, struct ata_disk *disk,
         return 0;
     if (fat16_mount(volume, disk))
         return 1;
-    shell_print_line(row, "Volume FAT16 indisponivel");
+    shell_print_error(row, "Volume FAT16 indisponivel");
     return 0;
 }
 
@@ -109,15 +109,16 @@ static void list_file(unsigned int *row, const struct fat16_file *file)
 
 void shell_ls(unsigned int *row, const unsigned char *argument)
 {
-    (void)argument;
     struct ata_disk disk;
     struct fat16_volume volume;
     if (!shell_open_volume(row, &disk, &volume))
         return;
 
     struct fat16_path path;
-    if (fat16_resolve_dir(&volume, shell_directory(), argument, &path) != 1) {
-        shell_print_line(row, "Pasta nao encontrada");
+    const int resolved = fat16_resolve_dir(&volume, shell_directory(),
+        shell_skip_spaces(argument), &path);
+    if (resolved != 1) {
+        shell_print_error(row, resolved < 0 ? "Falha ao ler pasta" : "Pasta nao encontrada");
         return;
     }
     struct fat16_dir dir = { .first_cluster = fat16_path_cluster(&path) };
@@ -130,8 +131,8 @@ void shell_ls(unsigned int *row, const unsigned char *argument)
         found = 1;
     }
     if (result < 0)
-        shell_print_line(row, "Falha ao ler diretorio");
-    else if (!found)
+        shell_print_error(row, "Falha ao ler diretorio");
+    else if (!found && !shell_has_output())
         shell_print_line(row, "Pasta vazia");
 }
 
@@ -308,15 +309,42 @@ int shell_find_file(unsigned int *row, const struct fat16_volume *volume,
     const int result = shell_lookup_file(volume, name, file);
     if (result == 1)
         return 1;
-    shell_print_line(row, result < 0 ? "Falha ao ler diretorio" : "Arquivo nao encontrado");
+    shell_print_error(row, result < 0 ? "Falha ao ler diretorio" : "Arquivo nao encontrado");
     return 0;
+}
+
+static int capture_file(void *context, const unsigned char *data, unsigned int size)
+{
+    (void)context;
+    return shell_capture(data, size);
 }
 
 void shell_cat(unsigned int *row, const unsigned char *argument)
 {
     const unsigned char *name = shell_skip_spaces(argument);
+    struct text_output output = {
+        .row = row, .lines_left = HEIGHT - FIRST_ROW - 1, .paged = !shell_in_pipeline()
+    };
+    if (shell_has_input()) {
+        if (*name) {
+            shell_print_error(row, "Uso: comando | cat");
+            return;
+        }
+        unsigned char bytes[512];
+        unsigned int count;
+        while ((count = shell_read_input(bytes, sizeof(bytes))) != 0) {
+            if (shell_has_output()) {
+                if (!shell_capture(bytes, count))
+                    return;
+            } else {
+                text_chunk(&output, bytes, count);
+            }
+        }
+        finish_text(&output);
+        return;
+    }
     if (!*name) {
-        shell_print_line(row, "Uso: cat <arquivo>");
+        shell_print_error(row, "Uso: cat <arquivo>");
         return;
     }
 
@@ -326,17 +354,15 @@ void shell_cat(unsigned int *row, const unsigned char *argument)
     if (!shell_open_volume(row, &disk, &volume) || !shell_find_file(row, &volume, name, &file))
         return;
 
-    struct text_output output = {
-        .row = row, .lines_left = HEIGHT - FIRST_ROW - 1, .paged = 1
-    };
-    const enum fat16_read_result result = fat16_read(&volume, &file, cat_chunk, &output);
-    if (result != FAT16_READ_STOPPED)
+    const int capture = shell_has_output();
+    const enum fat16_read_result result = fat16_read(&volume, &file,
+        capture ? capture_file : cat_chunk, &output);
+    if (!capture && result != FAT16_READ_STOPPED)
         finish_text(&output);
     if (result == FAT16_READ_ERROR)
-        shell_print_line(row, "Falha ao ler arquivo ou cadeia FAT16");
+        shell_print_error(row, "Falha ao ler arquivo ou cadeia FAT16");
 }
 
-#ifndef GPT_R_GRAPHICS
 static unsigned int read_app_line(void *context, unsigned char *buffer,
     unsigned int capacity)
 {
@@ -376,7 +402,19 @@ static unsigned int read_app_line(void *context, unsigned char *buffer,
     return length;
 }
 
-#endif
+static unsigned int read_app_input(void *context, unsigned char *buffer, unsigned int capacity)
+{
+    return shell_has_input() ? shell_read_input(buffer, capacity - 1) :
+        read_app_line(context, buffer, capacity);
+}
+
+static int write_app_output(void *context, const unsigned char *data, unsigned int size)
+{
+    if (shell_has_output())
+        return shell_capture(data, size);
+    text_chunk(context, data, size);
+    return 1;
+}
 
 static int pack_arguments(const unsigned char *text, unsigned char *args,
     struct app_launch *launch)
@@ -403,11 +441,11 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
     unsigned char args[APP_ARG_BYTES];
     struct app_launch launch = { .args = args, .directory = shell_directory() };
     if (!pack_arguments(argument, args, &launch)) {
-        shell_print_line(row, "Argumentos demais para run");
+        shell_print_error(row, "Argumentos demais para run");
         return;
     }
     if (!launch.argc) {
-        shell_print_line(row, "Uso: run <arquivo.APP> [argumentos]");
+        shell_print_error(row, "Uso: run <arquivo.APP> [argumentos]");
         return;
     }
 
@@ -417,24 +455,33 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
     if (!shell_open_volume(row, &disk, &volume) || !shell_find_file(row, &volume, args, &file))
         return;
 
+    struct app_result result;
 #ifdef GPT_R_GRAPHICS
-    const enum app_status status = desktop_open_app(&volume, &file, &launch);
-    switch (status) {
-#else
-    struct text_output output = { .row = row };
-    launch.output = text_chunk;
-    launch.input = read_app_line;
-    launch.context = &output;
-    const struct app_result result = app_run(&volume, &file, &launch);
-    finish_text(&output);
+    if (!shell_in_pipeline())
+        result = (struct app_result){ .status = desktop_open_app(&volume, &file, &launch) };
+    else
+#endif
+    {
+        struct text_output output = { .row = row };
+        launch.output = write_app_output;
+        launch.input = read_app_input;
+        launch.context = &output;
+        result = app_run(&volume, &file, &launch);
+        finish_text(&output);
+    }
+
     switch (result.status) {
     case APP_SAVE_ERROR:
-        shell_print_line(row, "Falha ao salvar arquivo");
+        shell_print_error(row, "Falha ao salvar arquivo");
         break;
     case APP_EXITED:
-        shell_print_number(row, "Codigo de saida: ", result.exit_code, "");
+        if (result.exit_code)
+            shell_mark_error();
+        if (result.exit_code || !shell_in_pipeline())
+            shell_print_number(row, "Codigo de saida: ", result.exit_code, "");
         break;
     case APP_FAULTED: {
+        shell_mark_error();
         char rip[] = "RIP 0x0000000000000000";
         shell_print_number(row, "Falha do programa, vetor: ", result.vector, "");
         shell_hex64(rip + 6, result.rip);
@@ -448,23 +495,25 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
     }
     case APP_INTERRUPTED:
         shell_discard_input();
-        shell_print_line(row, "Programa interrompido (Ctrl+C)");
+        shell_print_error(row, "Programa interrompido (Ctrl+C)");
         break;
-#endif
     case APP_INVALID:
-        shell_print_line(row, "Formato APP invalido");
+        shell_print_error(row, "Formato APP invalido");
         break;
     case APP_READ_ERROR:
-        shell_print_line(row, "Falha ao ler arquivo ou cadeia FAT16");
+        shell_print_error(row, "Falha ao ler arquivo ou cadeia FAT16");
         break;
     case APP_BAD_ARGS:
-        shell_print_line(row, "Argumentos invalidos");
+        shell_print_error(row, "Argumentos invalidos");
         break;
     case APP_NO_MEMORY:
-        shell_print_line(row, "Sem memoria para executar o programa");
+        shell_print_error(row, "Sem memoria para executar o programa");
         break;
     case APP_LIMIT:
-        shell_print_line(row, "Limite de janelas APP. Feche uma janela.");
+        shell_print_error(row, "Limite de janelas APP. Feche uma janela.");
+        break;
+    case APP_OUTPUT_ERROR:
+        shell_mark_error();
         break;
     default:
         break;

@@ -13,7 +13,7 @@ enum {
 };
 
 void app_window_reset(unsigned int slot);
-void app_window_write(void *context, const unsigned char *data, unsigned int count);
+int app_window_write(void *context, const unsigned char *data, unsigned int count);
 void *app_window_context(unsigned int slot);
 void app_window_update(unsigned int slot);
 void app_window_key(unsigned int slot, unsigned int key);

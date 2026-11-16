@@ -46,6 +46,9 @@ static volatile unsigned short queue[QUEUE_MASK + 1];
 static volatile unsigned int head;
 static volatile unsigned int tail;
 static unsigned int interrupt_key;
+#ifdef GPT_R_GRAPHICS
+static int capture_interrupt;
+#endif
 
 static unsigned int ctrl_keys, scan_pause;
 static int scan_extended;
@@ -111,7 +114,8 @@ static enum scan_action receive_byte(unsigned char status)
     const enum scan_action action = scan_shortcut(byte);
     const unsigned int next = (head + 1) & QUEUE_MASK;
 #ifdef GPT_R_GRAPHICS
-    if (action == INTERRUPT_APP && next != tail) {
+    if (action == INTERRUPT_APP && !__atomic_load_n(&capture_interrupt, __ATOMIC_RELAXED) &&
+        next != tail) {
         queue[head] = KEY_INTERRUPT;
         head = next;
         return DROP_SCAN;
@@ -170,6 +174,15 @@ void keyboard_irq_handler(void)
 int keyboard_take_interrupt(void)
 {
     return __atomic_exchange_n(&interrupt_key, 0, __ATOMIC_RELAXED);
+}
+
+void keyboard_capture_interrupt(int enabled)
+{
+#ifdef GPT_R_GRAPHICS
+    __atomic_store_n(&capture_interrupt, enabled, __ATOMIC_RELAXED);
+#else
+    (void)enabled;
+#endif
 }
 
 unsigned int keyboard_poll(struct keyboard_state *keyboard)
@@ -290,7 +303,7 @@ unsigned int keyboard_wait(struct keyboard_state *keyboard)
             return key;
 
 #ifdef GPT_R_GRAPHICS
-        if (app_ready()) {
+        if (!__atomic_load_n(&capture_interrupt, __ATOMIC_RELAXED) && app_ready()) {
             app_schedule();
             continue;
         }

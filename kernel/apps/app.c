@@ -56,7 +56,8 @@ struct process {
     unsigned char heap_runs[APP_HEAP_PAGES];
     unsigned int image_size, read_capacity;
     unsigned long long read_address;
-    void (*output)(void *, const unsigned char *, unsigned int);
+    int (*output)(void *, const unsigned char *, unsigned int);
+    int headless;
     void *context;
     struct app_result result;
 };
@@ -540,6 +541,8 @@ void app_preempt(const struct app_frame *frame)
 #ifdef GPT_R_GRAPHICS
 static void app_gui_syscall(struct app_frame *frame, unsigned long long number)
 {
+    if (running->headless)
+        return;
     const unsigned int slot = running - processes;
     switch (number) {
     case APP_GUI_BEGIN:
@@ -634,7 +637,8 @@ void app_syscall(struct app_frame *frame)
     if (!user_range(running, argument, length, 0))
         return;
 
-    running->output(running->context, (const unsigned char *)argument, length);
+    if (!running->output(running->context, (const unsigned char *)argument, length))
+        finish((struct app_result){ .status = APP_OUTPUT_ERROR });
     frame->rax = length;
 }
 
@@ -683,32 +687,39 @@ void app_release(unsigned int slot)
     processes[slot].pid = 0;
 }
 
-#ifndef GPT_R_GRAPHICS
 struct app_result app_run(const struct fat16_volume *volume,
     const struct fat16_file *file, const struct app_launch *launch)
 {
-    const enum app_status status = app_start(0, volume, file, launch);
+    unsigned int slot = 0;
+    while (slot < APP_PROCESS_LIMIT && processes[slot].pid)
+        ++slot;
+    if (slot == APP_PROCESS_LIMIT)
+        return (struct app_result){ .status = APP_LIMIT };
+    const enum app_status status = app_start(slot, volume, file, launch);
     if (status != APP_STARTED)
         return (struct app_result){ .status = status };
-    struct process *process = &processes[0];
+    struct process *process = &processes[slot];
+    process->headless = 1;
+    keyboard_capture_interrupt(1);
     struct app_result result;
-    while (!app_take_result(0, &result)) {
+    while (!app_take_result(slot, &result)) {
         if (keyboard_take_interrupt()) {
-            app_cancel(0);
+            app_cancel(slot);
         } else if (process->state == WAITING) {
             const unsigned int count = launch->input(launch->context, io_buffer,
                 process->read_capacity);
             if (count >= process->read_capacity)
-                app_cancel(0);
+                app_cancel(slot);
             else
-                app_complete_read(0, io_buffer, count);
+                app_complete_read(slot, io_buffer, count);
         } else {
-            app_schedule();
+            dispatch(process);
         }
     }
+    keyboard_capture_interrupt(0);
+    app_release(slot);
     return result;
 }
-#endif
 
 void app_handle_exception(unsigned long long cs, unsigned long long vector,
     unsigned long long rip, unsigned long long fault_address)

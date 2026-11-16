@@ -59,7 +59,7 @@ void *app_window_context(unsigned int slot)
     return &consoles[slot];
 }
 
-void app_window_write(void *context, const unsigned char *data, unsigned int count)
+int app_window_write(void *context, const unsigned char *data, unsigned int count)
 {
     struct app_console *console = context;
     for (unsigned int i = 0; i < count; ++i) {
@@ -98,6 +98,7 @@ void app_window_write(void *context, const unsigned char *data, unsigned int cou
             put(console, ch >= ' ' && ch <= '~' ? ch : '?');
         }
     }
+    return 1;
 }
 
 static void print(struct app_console *console, const char *label)

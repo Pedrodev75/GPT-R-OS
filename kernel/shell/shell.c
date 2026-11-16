@@ -108,6 +108,11 @@ static void command_uptime(unsigned int *row, const unsigned char *argument)
     shell_print_number(row, "", timer_uptime_seconds(), " s");
 }
 
+static void command_echo(unsigned int *row, const unsigned char *argument)
+{
+    shell_print_line(row, (const char *)shell_skip_spaces(argument));
+}
+
 static void command_reboot(unsigned int *row, const unsigned char *argument)
 {
     (void)argument;
@@ -129,45 +134,49 @@ static void command_demo(unsigned int *row, const unsigned char *argument)
 static void command_help(unsigned int *row, const unsigned char *argument);
 static void command_man(unsigned int *row, const unsigned char *argument);
 
+enum { COMMAND_OUTPUT = 1, COMMAND_INPUT = 2 };
+
 static const struct command {
     const char *name;
     const char *help;
     void (*run)(unsigned int *, const unsigned char *);
     const char *usage;
+    unsigned int streams;
 } commands[] = {
-    {"help", "Lista os comandos", command_help, 0},
-    {"clear", "Limpa o terminal", command_clear, 0},
-    {"version", "Mostra a versao", command_version, 0},
-    {"uptime", "Mostra o tempo ligado", command_uptime, 0},
-    {"mem", "Mostra o mapa e o uso da memoria", shell_mem, 0},
-    {"memtest", "Testa uma pagina de 4 KiB", shell_memtest, 0},
-    {"kmalloc", "Aloca um bloco (bytes em decimal)", shell_kmalloc, "<bytes>"},
-    {"kfree", "Libera um bloco (endereco hexadecimal)", shell_kfree, "<endereco>"},
-    {"peek", "Le 16 bytes de um endereco hexadecimal", shell_peek, "<endereco>"},
-    {"reboot", "Reinicia o sistema", command_reboot, 0},
-    {"diskinfo", "Mostra o disco ATA", shell_diskinfo, 0},
-    {"sector", "Mostra 16 bytes de um setor", shell_sector, "<LBA>"},
-    {"ls", "Lista pastas e arquivos FAT16", shell_ls, "[pasta]"},
-    {"cd", "Troca a pasta atual", shell_cd, "<pasta>"},
-    {"pwd", "Mostra o caminho da pasta atual", shell_pwd, 0},
-    {"mkdir", "Cria uma pasta", shell_mkdir, "<pasta>"},
-    {"cp", "Copia um arquivo", shell_cp, "<arquivo> <destino>"},
-    {"mv", "Move ou renomeia um arquivo", shell_mv, "<arquivo> <destino>"},
-    {"cat", "Le texto com paginacao", shell_cat, "<arquivo>"},
-    {"run", "Executa um .APP com argumentos", shell_run_app, "<arquivo.APP> [argumentos]"},
-    {"asm", "Monta um fonte para .APP", shell_assemble, "<fonte.asm> <saida.APP>"},
-    {"appinfo", "Mostra o cabecalho de um .APP", shell_appinfo, "<arquivo.APP>"},
+    {"help", "Lista os comandos", command_help, 0, COMMAND_OUTPUT},
+    {"clear", "Limpa o terminal", command_clear, 0, 0},
+    {"version", "Mostra a versao", command_version, 0, COMMAND_OUTPUT},
+    {"echo", "Escreve texto na saida", command_echo, "[texto]", COMMAND_OUTPUT},
+    {"uptime", "Mostra o tempo ligado", command_uptime, 0, COMMAND_OUTPUT},
+    {"mem", "Mostra o mapa e o uso da memoria", shell_mem, 0, COMMAND_OUTPUT},
+    {"memtest", "Testa uma pagina de 4 KiB", shell_memtest, 0, 0},
+    {"kmalloc", "Aloca um bloco (bytes em decimal)", shell_kmalloc, "<bytes>", 0},
+    {"kfree", "Libera um bloco (endereco hexadecimal)", shell_kfree, "<endereco>", 0},
+    {"peek", "Le 16 bytes de um endereco hexadecimal", shell_peek, "<endereco>", 0},
+    {"reboot", "Reinicia o sistema", command_reboot, 0, 0},
+    {"diskinfo", "Mostra o disco ATA", shell_diskinfo, 0, COMMAND_OUTPUT},
+    {"sector", "Mostra 16 bytes de um setor", shell_sector, "<LBA>", COMMAND_OUTPUT},
+    {"ls", "Lista pastas e arquivos FAT16", shell_ls, "[pasta]", COMMAND_OUTPUT},
+    {"cd", "Troca a pasta atual", shell_cd, "<pasta>", 0},
+    {"pwd", "Mostra o caminho da pasta atual", shell_pwd, 0, COMMAND_OUTPUT},
+    {"mkdir", "Cria uma pasta", shell_mkdir, "<pasta>", 0},
+    {"cp", "Copia um arquivo", shell_cp, "<arquivo> <destino>", 0},
+    {"mv", "Move ou renomeia um arquivo", shell_mv, "<arquivo> <destino>", 0},
+    {"cat", "Le texto com paginacao", shell_cat, "<arquivo>", COMMAND_OUTPUT | COMMAND_INPUT},
+    {"run", "Executa um .APP com argumentos", shell_run_app, "<arquivo.APP> [argumentos]", COMMAND_OUTPUT | COMMAND_INPUT},
+    {"asm", "Monta um fonte para .APP", shell_assemble, "<fonte.asm> <saida.APP>", 0},
+    {"appinfo", "Mostra o cabecalho de um .APP", shell_appinfo, "<arquivo.APP>", COMMAND_OUTPUT},
 #ifdef GPT_R_GRAPHICS
-    {"edit", "Abre o editor grafico de texto", shell_edit, "<arquivo>"},
+    {"edit", "Abre o editor grafico de texto", shell_edit, "<arquivo>", 0},
 #endif
-    {"write", "Cria ou sobrescreve um arquivo", shell_write, "<arquivo> <texto>"},
-    {"rm", "Remove um arquivo", shell_rm, "<arquivo>"},
-    {"color", "Muda as cores do terminal", command_color, "<frente> <fundo>"},
-    {"crash", "Executa testes, incluindo crash heap", shell_crash, "<tipo>"},
+    {"write", "Cria ou sobrescreve um arquivo", shell_write, "<arquivo> <texto>", 0},
+    {"rm", "Remove um arquivo", shell_rm, "<arquivo>", 0},
+    {"color", "Muda as cores do terminal", command_color, "<frente> <fundo>", 0},
+    {"crash", "Executa testes, incluindo crash heap", shell_crash, "<tipo>", 0},
 #ifdef GPT_R_GRAPHICS
-    {"demo", "Abre a demonstracao VGA", command_demo, 0},
+    {"demo", "Abre a demonstracao VGA", command_demo, 0, 0},
 #endif
-    {"man", "Mostra a sintaxe e a descricao", command_man, "<comando>"},
+    {"man", "Mostra a sintaxe e a descricao", command_man, "<comando>", COMMAND_OUTPUT},
 };
 
 static void command_help(unsigned int *row, const unsigned char *argument)
@@ -197,13 +206,21 @@ static void command_help(unsigned int *row, const unsigned char *argument)
     }
     shell_print_line(row, "");
     shell_print_line(row, "man <comando>  Mostra como usar um comando");
+    shell_print_line(row, "man pipe       Mostra como usar | e >");
 }
 
 static void command_man(unsigned int *row, const unsigned char *argument)
 {
     const unsigned char *name = shell_skip_spaces(argument);
     if (!*name) {
-        shell_print_line(row, "Uso: man <comando>");
+        shell_print_error(row, "Uso: man <comando>");
+        return;
+    }
+    if (shell_equals(name, "pipe")) {
+        shell_print_line(row, "comando | cat         Passa a saida ao proximo");
+        shell_print_line(row, "comando > arquivo    Grava a saida no FAT16");
+        shell_print_line(row, "Ate 8 comandos e 64 KiB por etapa capturada");
+        shell_print_line(row, "Use \\| e \\> para digitar os sinais como texto");
         return;
     }
     for (unsigned int i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
@@ -224,7 +241,7 @@ static void command_man(unsigned int *row, const unsigned char *argument)
         shell_print_line(row, command->help);
         return;
     }
-    shell_print_line(row, "Comando desconhecido. Use help.");
+    shell_print_error(row, "Comando desconhecido. Use help.");
 }
 
 enum { HISTORY_LIMIT = 16 };
@@ -288,6 +305,109 @@ static unsigned int show_input(unsigned int row, unsigned int prompt,
     return prompt + length - first;
 }
 
+enum { PIPE_STAGES = 8 };
+
+struct shell_stage {
+    const struct command *command;
+    const unsigned char *argument;
+};
+
+static int parse_stage(unsigned int *row, unsigned char *text, struct shell_stage *stage)
+{
+    const unsigned char *start = shell_skip_spaces(text);
+    unsigned char *end = text;
+    while (*end)
+        ++end;
+    while (end > text && end[-1] == ' ')
+        --end;
+    *end = 0;
+    if (!*start) {
+        shell_print_error(row, "Falta um comando na linha");
+        return 0;
+    }
+    for (unsigned int i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
+        const unsigned char *argument = argument_for(start, commands[i].name);
+        if (argument && (commands[i].usage || !*argument)) {
+            *stage = (struct shell_stage){&commands[i], argument};
+            return 1;
+        }
+    }
+    shell_print_error(row, "Comando desconhecido");
+    return 0;
+}
+
+static int redirect_sector(void *context, unsigned char sector[512], unsigned int size)
+{
+    return shell_buffer_read(context, sector, size) == size;
+}
+
+static void run_pipeline(unsigned int *row, const struct shell_stage *stages,
+    unsigned int count, const unsigned char *redirect)
+{
+    for (unsigned int i = 0; i < count; ++i) {
+        const unsigned int streams = stages[i].command->streams;
+        if (!streams || (i && !(streams & COMMAND_INPUT))) {
+            shell_print_error(row, "Comando incompativel com essa etapa do pipe ou >");
+            return;
+        }
+    }
+
+    struct ata_disk disk;
+    struct fat16_volume volume;
+    struct fat16_location target;
+    unsigned int name_size = 0;
+    if (redirect) {
+        unsigned char path[FAT16_PATH_CAPACITY];
+        if (!shell_word(&redirect, path, sizeof(path)) || *redirect) {
+            shell_print_error(row, "Uso: comando > arquivo");
+            return;
+        }
+        if (!shell_open_volume(row, &disk, &volume))
+            return;
+        const int resolved = fat16_resolve_parent(&volume, shell_directory(), path, &target);
+        if (resolved != 1) {
+            shell_print_error(row, resolved < 0 ? "Falha ao ler pasta de destino" :
+                "Caminho de destino invalido");
+            return;
+        }
+        while (target.name[name_size])
+            ++name_size;
+        const enum fat16_edit_result result = fat16_check_write(&volume,
+            target.directory, target.name, name_size);
+        if (result != FAT16_EDIT_OK) {
+            shell_report_file_edit(row, result, "Falha ao abrir destino");
+            return;
+        }
+    }
+
+    struct shell_buffer buffers[2] = {0};
+    struct shell_buffer *input = 0, *output = 0;
+    int failed = 0;
+    for (unsigned int i = 0; i < count; ++i) {
+        output = i + 1 < count || redirect ? &buffers[i % 2] : 0;
+        struct shell_stream stream = { .input = input, .output = output };
+        shell_set_stream(&stream);
+        stages[i].command->run(row, stages[i].argument);
+        shell_set_stream(0);
+        if (input)
+            shell_buffer_clear(input);
+        if (output && output->error)
+            shell_print_error(row, output->error);
+        failed = stream.failed || (output && output->error);
+        if (failed)
+            break;
+        input = output;
+    }
+    if (redirect && !failed) {
+        const enum fat16_edit_result result = fat16_write_stream_at(&volume,
+            target.directory, target.name, name_size, output->size, redirect_sector, output);
+        if (result != FAT16_EDIT_OK)
+            shell_report_file_edit(row, result, "Falha ao gravar destino");
+    }
+    shell_buffer_clear(&buffers[0]);
+    shell_buffer_clear(&buffers[1]);
+}
+
 static void execute(unsigned int *row, unsigned char *line, unsigned int length)
 {
     while (length && *line == ' ') {
@@ -301,14 +421,43 @@ static void execute(unsigned int *row, unsigned char *line, unsigned int length)
         return;
     remember_command(line, length);
 
-    for (unsigned int i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
-        const unsigned char *argument = argument_for(line, commands[i].name);
-        if (argument && (commands[i].usage || !*argument)) {
-            commands[i].run(row, argument);
+    struct shell_stage stages[PIPE_STAGES];
+    unsigned int count = 0;
+    unsigned char *part = line, *next = line, *redirect = 0;
+    for (const unsigned char *p = line; *p; ++p) {
+        if (*p == '\\' && (p[1] == '|' || p[1] == '>')) {
+            *next++ = *++p;
+            continue;
+        }
+        if (*p != '|' && *p != '>') {
+            *next++ = *p;
+            continue;
+        }
+        const unsigned char op = *p;
+        if (redirect || count == PIPE_STAGES) {
+            shell_print_error(row, "Pipe invalido ou com comandos demais");
             return;
         }
+        *next++ = 0;
+        if (!parse_stage(row, part, &stages[count++]))
+            return;
+        part = next;
+        if (op == '>')
+            redirect = part;
     }
-    shell_print_line(row, "Comando desconhecido");
+    *next = 0;
+    if (!redirect) {
+        if (count == PIPE_STAGES) {
+            shell_print_error(row, "Pipe aceita ate 8 comandos");
+            return;
+        }
+        if (!parse_stage(row, part, &stages[count++]))
+            return;
+    }
+    if (count == 1 && !redirect)
+        stages[0].command->run(row, stages[0].argument);
+    else
+        run_pipeline(row, stages, count, redirect);
 }
 
 unsigned int shell_wait_key(void)

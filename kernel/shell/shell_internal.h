@@ -3,11 +3,36 @@
 
 #include "../drivers/console.h"
 #include "../fs/fat16_path.h"
+#include "../memory/pages.h"
 
 enum {
     WIDTH = CONSOLE_WIDTH, HEIGHT = CONSOLE_HEIGHT,
     FIRST_ROW = 2, MAX_INPUT = 2 * FAT16_PATH_CAPACITY + 6
 };
+
+enum { SHELL_BUFFER_PAGES = 16 };
+
+struct shell_buffer {
+    unsigned char *pages[SHELL_BUFFER_PAGES];
+    unsigned int size, offset;
+    const char *error;
+};
+
+struct shell_stream {
+    struct shell_buffer *input, *output;
+    int failed;
+};
+
+void shell_set_stream(struct shell_stream *stream);
+int shell_has_input(void);
+int shell_has_output(void);
+int shell_in_pipeline(void);
+int shell_capture(const unsigned char *data, unsigned int size);
+unsigned int shell_read_input(unsigned char *data, unsigned int size);
+unsigned int shell_buffer_read(struct shell_buffer *buffer, unsigned char *data, unsigned int size);
+void shell_buffer_clear(struct shell_buffer *buffer);
+void shell_print_error(unsigned int *row, const char *text);
+void shell_mark_error(void);
 
 unsigned int shell_wait_key(void);
 void shell_discard_input(void);

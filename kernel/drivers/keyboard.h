@@ -3,6 +3,7 @@
 
 int keyboard_irq_init(void);
 int keyboard_take_interrupt(void);
+void keyboard_capture_interrupt(int enabled);
 
 enum {
     KEY_ESCAPE = 0x1b,

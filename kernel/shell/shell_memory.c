@@ -9,11 +9,11 @@ void shell_mem(unsigned int *row, const unsigned char *argument)
         E820_MAP;
     const unsigned int count = map->count;
     if (map->status == 0 || count > E820_MAX_ENTRIES || !count) {
-        shell_print_line(row, "Mapa E820 indisponivel");
+        shell_print_error(row, "Mapa E820 indisponivel");
         return;
     }
     if (map->status != E820_COMPLETE)
-        shell_print_line(row, "Mapa E820 incompleto");
+        shell_print_error(row, "Mapa E820 incompleto");
 
     shell_print_line(row, "Base fisica        Tamanho (bytes)    Tipo E820");
     unsigned long long usable = 0;

@@ -29,6 +29,10 @@ Na entrada, `RSP` está alinhado a 16 bytes e aponta para `argc` (64 bits). O ve
 
 Na chamada `read`, Backspace apaga o último caractere inteiro. A digitação ocupa uma linha e caracteres adicionais são ignorados quando o buffer ou a linha fica cheia. Capacidade zero retorna zero imediatamente. Um buffer fora da pilha retorna `-1`.
 
+Ao receber [entrada de um pipe](shell-pipes.md), `read` entrega bytes em
+blocos de até `capacidade - 1`, incluindo quebras de linha e bytes NUL.
+Retorna zero no fim da entrada e acrescenta um NUL após os bytes lidos.
+
 ## Gerar OLA.APP no Windows
 
 Na raiz do projeto, abra o PowerShell e rode:

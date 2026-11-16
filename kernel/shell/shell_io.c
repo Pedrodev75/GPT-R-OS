@@ -1,5 +1,93 @@
 #include "shell_internal.h"
 
+static struct shell_stream *active_stream;
+
+void shell_set_stream(struct shell_stream *stream)
+{
+    active_stream = stream;
+}
+
+int shell_has_input(void)
+{
+    return active_stream && active_stream->input;
+}
+
+int shell_has_output(void)
+{
+    return active_stream && active_stream->output;
+}
+
+int shell_in_pipeline(void)
+{
+    return active_stream != 0;
+}
+
+int shell_capture(const unsigned char *data, unsigned int size)
+{
+    struct shell_buffer *buffer = active_stream->output;
+    if (buffer->error)
+        return 0;
+    if (size > SHELL_BUFFER_PAGES * PAGE_SIZE - buffer->size) {
+        buffer->error = "Saida excede o limite de 64 KiB";
+        return 0;
+    }
+    while (size) {
+        const unsigned int page = buffer->size / PAGE_SIZE;
+        const unsigned int at = buffer->size % PAGE_SIZE;
+        if (!buffer->pages[page]) {
+            buffer->pages[page] = page_alloc();
+            if (!buffer->pages[page]) {
+                buffer->error = "Sem memoria para armazenar a saida";
+                return 0;
+            }
+        }
+        const unsigned int count = size < PAGE_SIZE - at ? size : PAGE_SIZE - at;
+        for (unsigned int i = 0; i < count; ++i)
+            buffer->pages[page][at + i] = data[i];
+        buffer->size += count;
+        data += count;
+        size -= count;
+    }
+    return 1;
+}
+
+unsigned int shell_buffer_read(struct shell_buffer *buffer, unsigned char *data, unsigned int size)
+{
+    const unsigned int remaining = buffer->size - buffer->offset;
+    const unsigned int count = size < remaining ? size : remaining;
+    for (unsigned int i = 0; i < count; ++i) {
+        const unsigned int at = buffer->offset + i;
+        data[i] = buffer->pages[at / PAGE_SIZE][at % PAGE_SIZE];
+    }
+    buffer->offset += count;
+    return count;
+}
+
+unsigned int shell_read_input(unsigned char *data, unsigned int size)
+{
+    return shell_buffer_read(active_stream->input, data, size);
+}
+
+void shell_buffer_clear(struct shell_buffer *buffer)
+{
+    for (unsigned int i = 0; i < SHELL_BUFFER_PAGES; ++i)
+        if (buffer->pages[i])
+            page_free(buffer->pages[i]);
+    *buffer = (struct shell_buffer){0};
+}
+
+void shell_mark_error(void)
+{
+    if (active_stream)
+        active_stream->failed = 1;
+}
+
+void shell_print_error(unsigned int *row, const char *text)
+{
+    shell_mark_error();
+    shell_print_line(row, text);
+}
+
 void shell_clear_row(unsigned int row)
 {
     for (unsigned int col = 0; col < WIDTH; ++col)
@@ -23,6 +111,16 @@ void shell_next_row(unsigned int *row)
 
 void shell_print_line(unsigned int *row, const char *text)
 {
+    if (shell_has_output() && !active_stream->failed) {
+        while (*text) {
+            unsigned char bytes[3];
+            const unsigned int size = shell_encode_glyph(bytes, (unsigned char)*text++);
+            if (!shell_capture(bytes, size))
+                return;
+        }
+        shell_capture((const unsigned char *)"\n", 1);
+        return;
+    }
     unsigned int col = 0;
     while (*text) {
         if (col == WIDTH) {
