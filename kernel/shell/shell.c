@@ -149,6 +149,9 @@ static const struct command {
     {"run", "Executa um .APP com argumentos", shell_run_app, 1},
     {"asm", "Monta um fonte para .APP", shell_assemble, 1},
     {"appinfo", "Mostra o cabecalho de um .APP", shell_appinfo, 1},
+#ifdef GPT_R_GRAPHICS
+    {"edit", "Abre o editor grafico de texto", shell_edit, 1},
+#endif
     {"write", "Cria ou sobrescreve um arquivo", shell_write, 1},
     {"rm", "Remove um arquivo", shell_rm, 1},
     {"color", "Muda as cores do terminal", command_color, 1},

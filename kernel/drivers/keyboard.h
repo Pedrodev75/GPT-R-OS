@@ -9,7 +9,11 @@ enum {
     KEY_DOWN,
     KEY_LEFT,
     KEY_RIGHT,
-    KEY_INTERRUPT
+    KEY_INTERRUPT,
+    KEY_SAVE,
+    KEY_HOME,
+    KEY_END,
+    KEY_DELETE
 };
 
 struct keyboard_state {

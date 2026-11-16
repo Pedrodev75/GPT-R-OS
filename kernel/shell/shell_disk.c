@@ -143,7 +143,7 @@ static unsigned int glyph_codepoint(unsigned char glyph)
     return glyph >= 32 && glyph <= 126 ? glyph : '?';
 }
 
-static unsigned char codepoint_glyph(unsigned int codepoint)
+unsigned char shell_codepoint_glyph(unsigned int codepoint)
 {
     if (codepoint >= 32 && codepoint <= 126)
         return codepoint;
@@ -153,7 +153,7 @@ static unsigned char codepoint_glyph(unsigned int codepoint)
     return codepoint == 0x00b4 ? 0xf0 : '?';
 }
 
-static unsigned int encode_glyph(unsigned char *bytes, unsigned char glyph)
+unsigned int shell_encode_glyph(unsigned char *bytes, unsigned char glyph)
 {
     const unsigned int cp = glyph_codepoint(glyph);
     if (cp < 0x80) {
@@ -175,7 +175,7 @@ static unsigned int encode_text(unsigned char *bytes, const unsigned char *text)
 {
     unsigned int size = 0;
     while (*text)
-        size += encode_glyph(bytes + size, *text++);
+        size += shell_encode_glyph(bytes + size, *text++);
     return size;
 }
 
@@ -237,7 +237,7 @@ static void text_chunk(void *context, const unsigned char *data, unsigned int si
                 output->codepoint = (output->codepoint << 6) | (ch & 63);
                 if (!--output->continuation) {
                     unsigned int cp = output->codepoint;
-                    text_byte(output, cp >= output->minimum ? codepoint_glyph(cp) : '?');
+                    text_byte(output, cp >= output->minimum ? shell_codepoint_glyph(cp) : '?');
                 }
                 continue;
             }
@@ -284,7 +284,7 @@ static void finish_text(struct text_output *output)
         shell_next_row(output->row);
 }
 
-int shell_find_file(unsigned int *row, const struct fat16_volume *volume,
+int shell_lookup_file(const struct fat16_volume *volume,
     const unsigned char *name, struct fat16_file *file)
 {
     struct fat16_dir dir;
@@ -293,6 +293,15 @@ int shell_find_file(unsigned int *row, const struct fat16_volume *volume,
     while ((result = fat16_next(volume, &dir, file)) > 0)
         if (shell_equals(name, file->name))
             return 1;
+    return result;
+}
+
+int shell_find_file(unsigned int *row, const struct fat16_volume *volume,
+    const unsigned char *name, struct fat16_file *file)
+{
+    const int result = shell_lookup_file(volume, name, file);
+    if (result == 1)
+        return 1;
     shell_print_line(row, result < 0 ? "Falha ao ler diretorio" : "Arquivo nao encontrado");
     return 0;
 }
@@ -345,7 +354,7 @@ static unsigned int read_app_line(void *context, unsigned char *buffer,
             console_put(*output->row * WIDTH + --output->col, console_color | ' ');
         } else if (key >= ' ' && key <= 255 && output->col < WIDTH - 1) {
             unsigned char bytes[3];
-            const unsigned int size = encode_glyph(bytes, key);
+            const unsigned int size = shell_encode_glyph(bytes, key);
             if (size < capacity - length) {
                 for (unsigned int i = 0; i < size; ++i)
                     buffer[length++] = bytes[i];
@@ -370,7 +379,7 @@ static int pack_arguments(const unsigned char *text, unsigned char *args,
         ++launch->argc;
         while (*text && *text != ' ') {
             unsigned char bytes[3];
-            const unsigned int size = encode_glyph(bytes, *text++);
+            const unsigned int size = shell_encode_glyph(bytes, *text++);
             if (size >= APP_ARG_BYTES - launch->args_size)
                 return 0;
             for (unsigned int i = 0; i < size; ++i)

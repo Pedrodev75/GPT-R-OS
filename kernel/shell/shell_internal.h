@@ -18,6 +18,8 @@ void shell_print_line(unsigned int *row, const char *text);
 void shell_print_number(unsigned int *row, const char *label,
                         unsigned long long value, const char *unit);
 void shell_print_bytes(unsigned int *row, const volatile unsigned char *bytes);
+unsigned char shell_codepoint_glyph(unsigned int codepoint);
+unsigned int shell_encode_glyph(unsigned char *bytes, unsigned char glyph);
 void shell_hex64(char *text, unsigned long long value);
 int shell_equals(const unsigned char *input, const char *command);
 int shell_parse_address(const unsigned char *text, unsigned long long *address);
@@ -36,10 +38,13 @@ void shell_sector(unsigned int *row, const unsigned char *argument);
 void shell_ls(unsigned int *row, const unsigned char *argument);
 void shell_run_app(unsigned int *row, const unsigned char *argument);
 int shell_open_volume(unsigned int *row, struct ata_disk *disk, struct fat16_volume *volume);
+int shell_lookup_file(const struct fat16_volume *volume,
+    const unsigned char *name, struct fat16_file *file);
 int shell_find_file(unsigned int *row, const struct fat16_volume *volume,
     const unsigned char *name, struct fat16_file *file);
 void shell_report_file_edit(unsigned int *row, enum fat16_edit_result result,
     const char *success);
+void shell_edit(unsigned int *row, const unsigned char *argument);
 void shell_assemble(unsigned int *row, const unsigned char *argument);
 void shell_appinfo(unsigned int *row, const unsigned char *argument);
 void shell_cat(unsigned int *row, const unsigned char *argument);

@@ -40,8 +40,8 @@ static void put_pixel(volatile unsigned char* pixel, unsigned int rgb)
 /* boot.S copies the BIOS 8x8 font here before entering long mode. */
 static const unsigned char* const font = (const unsigned char*)0x6000;
 
-static void rect(unsigned int x, unsigned int y, unsigned int width,
-    unsigned int height, unsigned char color)
+void vga_graphics_fill(unsigned int x, unsigned int y, unsigned int width,
+    unsigned int height, unsigned int rgb)
 {
     if (x >= WIDTH || y >= HEIGHT)
         return;
@@ -50,12 +50,17 @@ static void rect(unsigned int x, unsigned int y, unsigned int width,
     if (height > HEIGHT - y)
         height = HEIGHT - y;
 
-    const unsigned int rgb = palette[color];
     for (unsigned int row = 0; row < height; ++row) {
         volatile unsigned char* pixel = video + (y + row) * pitch + x * 3;
         for (unsigned int col = 0; col < width; ++col, pixel += 3)
             put_pixel(pixel, rgb);
     }
+}
+
+static void rect(unsigned int x, unsigned int y, unsigned int width,
+    unsigned int height, unsigned char color)
+{
+    vga_graphics_fill(x, y, width, height, palette[color]);
 }
 
 static void draw_text(unsigned int x, unsigned int y, const char* text,
@@ -76,7 +81,7 @@ static unsigned short cells[CELL_COUNT];
 /* Zero means hidden, including before the shell starts. */
 static unsigned int cursor_slot;
 static unsigned int cursor_visible;
-static volatile int demo_active;
+static volatile int overlay_active;
 /* Seven rows per glyph, five pixels packed into each row. */
 static const unsigned char terminal_font['z' - '0' + 1][7] = {
     ['A' - '0'] = { 0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11 },
@@ -197,6 +202,25 @@ static unsigned char glyph_row(unsigned char ch, unsigned int row)
     return font[(ch < 128 ? ch : '?') * 8 + row];
 }
 
+void vga_graphics_overlay_glyph(unsigned int x, unsigned int y,
+    unsigned char glyph, unsigned int rgb)
+{
+    if (x > WIDTH - VGA_OVERLAY_CELL_WIDTH || y > HEIGHT - VGA_OVERLAY_GLYPH_HEIGHT)
+        return;
+    for (unsigned int row = 0; row < VGA_OVERLAY_GLYPH_HEIGHT; ++row) {
+        const unsigned int source_y = (2 * row + 1) * GLYPH_HEIGHT /
+            (2 * VGA_OVERLAY_GLYPH_HEIGHT);
+        const unsigned char bits = glyph_row(glyph, source_y);
+        volatile unsigned char *pixels = video + (y + row) * pitch + x * 3;
+        for (unsigned int col = 0; col < VGA_OVERLAY_CELL_WIDTH; ++col) {
+            const unsigned int source_x = (2 * col + 1) * GLYPH_SIZE /
+                (2 * VGA_OVERLAY_CELL_WIDTH);
+            if (bits & (0x80 >> source_x))
+                put_pixel(pixels + col * 3, rgb);
+        }
+    }
+}
+
 enum { DISPLAY_GLYPH_HEIGHT = VGA_LINE_HEIGHT - 1 };
 
 static void render_cell(unsigned int cell, unsigned short value)
@@ -235,7 +259,7 @@ void vga_graphics_put(unsigned int cell, unsigned short value)
 {
     if (cell < CELL_COUNT) {
         cells[cell] = value;
-        if (!demo_active)
+        if (!overlay_active)
             render_cell(cell, value);
     }
 }
@@ -284,16 +308,22 @@ void vga_graphics_init(void)
     init_palette();
     cursor_slot = 0;
     cursor_visible = 0;
-    demo_active = 0;
+    overlay_active = 0;
     clear_console_margins();
+}
+
+void vga_graphics_begin_overlay(void)
+{
+    vga_graphics_cursor(CELL_COUNT);
+    overlay_active = 1;
 }
 
 void vga_graphics_restore_console(void)
 {
-    if (!demo_active)
+    if (!overlay_active)
         return;
 
-    /* Timer IRQ updates the shadow cells while the demo owns the screen. */
+    /* Timer IRQ updates the shadow cells while the overlay owns the screen. */
     for (unsigned int cell = 0; cell < CELL_COUNT; ++cell)
         if (cell / COLUMNS != 1)
             render_cell(cell, cells[cell]);
@@ -302,7 +332,7 @@ void vga_graphics_restore_console(void)
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
     for (unsigned int cell = COLUMNS; cell < 2 * COLUMNS; ++cell)
         render_cell(cell, cells[cell]);
-    demo_active = 0;
+    overlay_active = 0;
     if (flags & 0x200)
         __asm__ volatile ("sti" : : : "memory");
     clear_console_margins();
@@ -317,8 +347,7 @@ void vga_graphics_demo(struct keyboard_state* keyboard)
     unsigned int color = 0;
     unsigned int last = timer_ticks();
 
-    vga_graphics_cursor(CELL_COUNT);
-    demo_active = 1;
+    vga_graphics_begin_overlay();
     rect(0, 0, WIDTH, HEIGHT, 0);
     draw_text(24, 20, "GPT-R OS / DEMO", 2, 15);
     for (unsigned int i = 0; i < 256; ++i)

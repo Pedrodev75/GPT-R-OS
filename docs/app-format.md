@@ -39,15 +39,36 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Pack-App.ps1 -Messag
 
 O script já contém o código equivalente ao exemplo em `apps/OLA.S`. Sem `-Message`, gera a mensagem `Ola, GPT-R OS!`. Para empacotar outro código x86-64 que você já montou como binário plano, passe `-InputPath programa.bin` e, se necessário, `-EntryOffset`.
 
-O shell compara o nome exatamente como aparece no `ls`. Na imagem de HD de teste, use `ola.APP` com o nome em minúsculas e a extensão em maiúsculas.
-
-| Comando | Resultado |
-|---|---|
-| `run eco.APP Ola mundo` | Mostra os argumentos separados por espaços. |
-| `run nome.APP` | Pede seu nome e exibe uma saudação depois de Enter. Pressione **Ctrl+C** durante a leitura para voltar ao shell. |
-| `run loop.APP` | Entra em loop. Pressione **Ctrl+C** para encerrar o programa e voltar ao shell. |
-| `run ola.APP` | Exibe uma mensagem, mostra o código de saída 0 e volta ao prompt. |
-| `run FALHA.APP` | Executa `ud2`, mostra o vetor 6 e volta ao prompt. |
-| `run INVALIDO.APP` | Recusa um cabeçalho inválido e volta ao prompt. |
+O shell compara o nome exatamente como aparece no `ls`. A imagem de teste contém `ola.APP` e `ola.asm`. Rode `run ola.APP` para ver a mensagem de exemplo e o código de saída 0. Os outros exemplos estão em `apps/` para quem quiser montá-los. Durante um programa ativo, **Ctrl+C** devolve o controle ao shell.
 
 O código e as constantes ficam em uma página de leitura e execução. A pilha tem 4 KiB com uma página de guarda abaixo dela. A pilha tem execução desabilitada quando a CPU oferece NX. Ao encerrar ou interromper o programa com **Ctrl+C**, o kernel libera as duas páginas e volta ao shell.
+
+## Montar um .APP dentro do GPT-R OS
+
+A imagem de HD inclui o fonte `ola.asm`. No shell, rode:
+
+```text
+edit ola.asm
+asm ola.asm feito.APP
+appinfo feito.APP
+run feito.APP
+```
+
+No editor, use **Ctrl+S** para salvar e **Esc** para voltar ao shell. Se houver alterações pendentes, o editor oferece salvar, descartar ou continuar editando. Ele abre arquivos UTF-8 de até 4 KiB e salva as quebras de linha em LF.
+
+Com o fonte de exemplo, o programa imprime `Ola do GPT-R OS!` e sai com código 0. Para conservar o arquivo montado após fechar o QEMU, use uma cópia do HD com gravação persistente.
+
+O comando `asm` monta um subconjunto da sintaxe Intel x86-64. O fonte e a imagem de código e dados têm limite de 4 KiB cada. Os nomes de rótulos distinguem maiúsculas de minúsculas. Use `;` para iniciar um comentário.
+
+| Sintaxe | Operação |
+|---|---|
+| `rotulo:` | Define um endereço para saltos, dados e ponto de entrada. |
+| `entry rotulo` | Define o ponto de entrada. Sem a diretiva, o início do código é a entrada. |
+| `mov eax, 1` | Carrega um imediato de 32 bits em `eax`, `edx`, `edi` ou `esi`. Aceita decimal, hexadecimal com `0x` e diferença de rótulos, como `fim - mensagem`. |
+| `lea rdi, [rip + rotulo]` | Coloca o endereço de um rótulo em `rdi`. |
+| `int 0x80` | Chama o kernel. |
+| `jmp rotulo` | Salta para um rótulo. |
+| `nop`, `ud2` | Operação vazia ou instrução inválida para diagnóstico. |
+| `db "Texto", 10` | Grava strings e números de 0 a 255 como bytes. |
+
+O montador informa a linha do erro e só grava a saída depois de montar o fonte inteiro. O `appinfo` verifica a assinatura, os campos do cabeçalho e o tamanho do arquivo antes de mostrar a versão do formato e o ponto de entrada.

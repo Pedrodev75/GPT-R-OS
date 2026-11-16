@@ -5,14 +5,14 @@
 /* ABNT2 scan codes, translated by the PS/2 controller to set 1. */
 static const unsigned char normal[128] = {
     [2] = '1', '2','3','4','5','6','7','8','9','0','-','=',
-    '\b',[16] = 'q','w','e','r','t','y','u','i','o','p', 0xf0,'[',
+    '\b','\t',[16] = 'q','w','e','r','t','y','u','i','o','p', 0xf0,'[',
     '\n',[30] = 'a','s','d','f','g','h','j','k','l', 0x80,0xf2,'\'',
     [43] = ']', 'z','x','c','v','b','n','m',',','.',';',[55] = '*',
     [57] = ' ',[0x56] = '\\',[0x73] = '/',[0x7e] = '.'
 };
 static const unsigned char shifted[128] = {
     [2] = '!', '@','#','$','%','^','&','*','(',')','_','+',
-    '\b',[16] = 'Q','W','E','R','T','Y','U','I','O','P',0xf1,'{',
+    '\b','\t',[16] = 'Q','W','E','R','T','Y','U','I','O','P',0xf1,'{',
     '\n',[30] = 'A','S','D','F','G','H','J','K','L',0x81,0xf3,'"',
     [43] = '}', 'Z','X','C','V','B','N','M','<','>',':',[55] = '*',
     [57] = ' ',[0x56] = '|',[0x73] = '?',[0x7e] = '.'
@@ -40,14 +40,15 @@ static void write_port(unsigned short port, unsigned char value)
 }
 
 enum { QUEUE_MASK = 63 };
-static volatile unsigned char queue[QUEUE_MASK + 1];
+static volatile unsigned short queue[QUEUE_MASK + 1];
 static volatile unsigned int head;
 static volatile unsigned int tail;
 
 static unsigned int ctrl_keys, scan_pause;
-static int scan_extended, suppress_c;
+static int scan_extended;
+static unsigned int suppressed_shortcuts;
 
-enum scan_action { QUEUE_SCAN, DROP_SCAN, INTERRUPT_APP };
+enum scan_action { QUEUE_SCAN, DROP_SCAN, INTERRUPT_APP, SAVE_EDITOR };
 
 static enum scan_action scan_shortcut(unsigned char byte)
 {
@@ -75,16 +76,17 @@ static enum scan_action scan_shortcut(unsigned char byte)
         else
             ctrl_keys |= mask;
     }
-    if (extended || code != 0x2e)
+    if (extended || (code != 0x2e && code != 0x1f))
         return QUEUE_SCAN;
-    if (suppress_c) {
+    const unsigned int shortcut = code == 0x2e ? 1 : 2;
+    if (suppressed_shortcuts & shortcut) {
         if (released)
-            suppress_c = 0;
+            suppressed_shortcuts &= ~shortcut;
         return DROP_SCAN;
     }
     if (!released && ctrl_keys) {
-        suppress_c = 1;
-        return INTERRUPT_APP;
+        suppressed_shortcuts |= shortcut;
+        return shortcut == 1 ? INTERRUPT_APP : SAVE_EDITOR;
     }
     return QUEUE_SCAN;
 }
@@ -97,8 +99,8 @@ static enum scan_action receive_byte(unsigned char status)
     /* Recognize Ctrl+C even if a CPU-bound app has filled the input queue. */
     const enum scan_action action = scan_shortcut(byte);
     const unsigned int next = (head + 1) & QUEUE_MASK;
-    if (action == QUEUE_SCAN && next != tail) {
-        queue[head] = byte;
+    if ((action == QUEUE_SCAN || action == SAVE_EDITOR) && next != tail) {
+        queue[head] = action == SAVE_EDITOR ? KEY_SAVE : byte;
         head = next;
     }
     return action;
@@ -109,7 +111,8 @@ int keyboard_irq_init(void)
     head = 0;
     tail = 0;
     ctrl_keys = scan_pause = 0;
-    scan_extended = suppress_c = 0;
+    scan_extended = 0;
+    suppressed_shortcuts = 0;
 
     /* Remap the two 8259 PICs, then unmask IRQ0 and IRQ1. */
     write_port(0x21, 0xff);
@@ -152,8 +155,14 @@ unsigned int keyboard_poll(struct keyboard_state *keyboard)
     }
     /* IRQ1 owns head. Only the foreground consumer advances tail. */
     while (head != tail) {
-        const unsigned char key = queue[tail];
+        const unsigned int key = queue[tail];
         tail = (tail + 1) & QUEUE_MASK;
+        if (key == KEY_SAVE) {
+            keyboard->extended = 0;
+            keyboard->pause_bytes = 0;
+            keyboard->accent = 0;
+            return key;
+        }
 
         if (keyboard->pause_bytes) {
             --keyboard->pause_bytes;
@@ -175,6 +184,9 @@ unsigned int keyboard_poll(struct keyboard_state *keyboard)
             case 0x50: return KEY_DOWN;
             case 0x4b: return KEY_LEFT;
             case 0x4d: return KEY_RIGHT;
+            case 0x47: return KEY_HOME;
+            case 0x4f: return KEY_END;
+            case 0x53: return KEY_DELETE;
             default: continue;
             }
         }
