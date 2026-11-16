@@ -21,35 +21,25 @@ start:
     test dl, 0x80
     jnz read_hd
 
-    # Read the rest of cylinder zero, then cylinder one head zero.
-    push dx
-    mov bx, 0x7e00
-    mov ax, 0x0211
-    mov cx, 2
-    xor dh, dh
-    int 0x13
-    pop dx
-    jc disk_error
-
-    xor ax, ax
-    mov es, ax
-    push dx
-    mov bx, 0xa000
-    mov ax, 0x0212
-    mov cx, 1
-    mov dh, 1
-    int 0x13
-    pop dx
-    jc disk_error
-
-    xor ax, ax
-    mov es, ax
-    mov bx, 0xc400
-    mov ax, 0x0212
-    mov cx, 0x0101
-    xor dh, dh
-    int 0x13
-    jc disk_error
+    # Split floppy reads at track boundaries and at physical 0x10000.
+    .macro read_floppy segment, offset, count, track, head
+        mov ax, \segment
+        mov es, ax
+        mov bx, \offset
+        mov ax, 0x0200 | \count
+        mov cx, \track
+        push dx
+        mov dh, \head
+        int 0x13
+        pop dx
+        jc disk_error
+    .endm
+    read_floppy 0,      0x7e00, 17, 0x0002, 0
+    read_floppy 0,      0xa000, 18, 0x0001, 1
+    read_floppy 0,      0xc400, 18, 0x0101, 0
+    read_floppy 0,      0xe800, 12, 0x0101, 1
+    read_floppy 0x1000, 0x0000,  6, 0x010d, 1
+    read_floppy 0x1000, 0x0c00, 18, 0x0201, 0
     jmp stage2
 read_hd:
     # Keep the BIOS-selected drive number across the EDD capability check.
@@ -67,6 +57,14 @@ read_hd:
     jz disk_error
 
     mov si, offset disk_packet
+    push ds
+    push dx
+    mov ax, 0x4200
+    int 0x13
+    pop dx
+    pop ds
+    jc disk_error
+    mov si, offset disk_packet_high
     mov ax, 0x4200
     int 0x13
     jc disk_error
@@ -83,9 +81,14 @@ disk_error:
 .balign 4
 disk_packet:
     .byte 0x10, 0
-    .word 53
+    .word 65
     .word 0x7e00, 0
     .quad 1
+disk_packet_high:
+    .byte 0x10, 0
+    .word 24
+    .word 0, 0x1000
+    .quad 66
 
 # The HD image builder fills the partition table at bytes 446-509.
 .org 446

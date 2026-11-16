@@ -2,7 +2,6 @@
 #include "../memory/pages.h"
 
 enum {
-    HEADER_SIZE = 32,
     USER_IMAGE = 0x80000000u,
     USER_STACK = USER_IMAGE + 2 * PAGE_SIZE,
     USER_PDPT_SLOT = USER_IMAGE >> 30,
@@ -69,7 +68,7 @@ void app_init(void)
 }
 
 struct image_reader {
-    unsigned char header[HEADER_SIZE];
+    unsigned char header[APP_HEADER_SIZE];
     unsigned char *image;
     unsigned int size;
 };
@@ -79,10 +78,10 @@ static int collect_image(void *context, const unsigned char *data, unsigned int 
     struct image_reader *reader = context;
     for (unsigned int i = 0; i < size; ++i) {
         const unsigned int at = reader->size++;
-        if (at < HEADER_SIZE)
+        if (at < APP_HEADER_SIZE)
             reader->header[at] = data[i];
-        else if (at < HEADER_SIZE + PAGE_SIZE)
-            reader->image[at - HEADER_SIZE] = data[i];
+        else if (reader->image && at < APP_HEADER_SIZE + APP_IMAGE_LIMIT)
+            reader->image[at - APP_HEADER_SIZE] = data[i];
     }
     return 1;
 }
@@ -97,16 +96,52 @@ static int valid_image(const struct image_reader *reader, unsigned int file_size
 {
     const unsigned char *h = reader->header;
     if (reader->size != file_size || read_u32(h) != 0x41525447u ||
-        read_u32(h + 4) != ((HEADER_SIZE << 16) | 1) ||
-        read_u32(h + 8) != file_size - HEADER_SIZE)
+        read_u32(h + 4) != ((APP_HEADER_SIZE << 16) | APP_FORMAT_VERSION) ||
+        read_u32(h + 8) != file_size - APP_HEADER_SIZE)
         return 0;
     *entry = read_u32(h + 12);
-    if (*entry >= file_size - HEADER_SIZE)
+    if (*entry >= file_size - APP_HEADER_SIZE)
         return 0;
-    for (unsigned int i = 16; i < HEADER_SIZE; ++i)
+    for (unsigned int i = 16; i < APP_HEADER_SIZE; ++i)
         if (h[i])
             return 0;
     return 1;
+}
+
+static int read_image(const struct fat16_volume *volume, const struct fat16_file *file,
+    unsigned char *image, struct app_info *info)
+{
+    if (file->size <= APP_HEADER_SIZE || file->size > APP_HEADER_SIZE + APP_IMAGE_LIMIT)
+        return 0;
+    struct image_reader reader = { .image = image };
+    if (fat16_read(volume, file, collect_image, &reader) != FAT16_READ_OK)
+        return -1;
+    if (!valid_image(&reader, file->size, &info->entry))
+        return 0;
+    info->image_size = file->size - APP_HEADER_SIZE;
+    return 1;
+}
+
+int app_inspect(const struct fat16_volume *volume, const struct fat16_file *file,
+    struct app_info *info)
+{
+    return read_image(volume, file, 0, info);
+}
+
+void app_make_header(unsigned char *header, unsigned int size, unsigned int entry)
+{
+    for (unsigned int i = 0; i < APP_HEADER_SIZE; ++i)
+        header[i] = 0;
+    header[0] = 'G';
+    header[1] = 'T';
+    header[2] = 'R';
+    header[3] = 'A';
+    header[4] = APP_FORMAT_VERSION;
+    header[6] = APP_HEADER_SIZE;
+    for (unsigned int i = 0; i < 4; ++i) {
+        header[8 + i] = size >> (i * 8);
+        header[12 + i] = entry >> (i * 8);
+    }
 }
 
 static void flush_tlb(void)
@@ -183,7 +218,7 @@ static struct app_result execute_image(void *image, void *stack, unsigned int si
 struct app_result app_run(const struct fat16_volume *volume,
     const struct fat16_file *file, const struct app_launch *launch)
 {
-    if (file->size <= HEADER_SIZE || file->size > HEADER_SIZE + PAGE_SIZE)
+    if (file->size <= APP_HEADER_SIZE || file->size > APP_HEADER_SIZE + APP_IMAGE_LIMIT)
         return (struct app_result){ .status = APP_INVALID };
     unsigned char *image = page_alloc();
     if (!image)
@@ -191,26 +226,21 @@ struct app_result app_run(const struct fat16_volume *volume,
 
     for (unsigned int i = 0; i < PAGE_SIZE; ++i)
         image[i] = 0;
-    struct image_reader reader = { .image = image };
-    const int read_ok = fat16_read(volume, file, collect_image, &reader) == FAT16_READ_OK;
-    unsigned int entry;
-    enum app_status failure = APP_READ_ERROR;
-    if (read_ok) {
-        failure = APP_INVALID;
-        if (valid_image(&reader, file->size, &entry)) {
-            unsigned char *stack = page_alloc();
-            if (stack) {
-                for (unsigned int i = 0; i < PAGE_SIZE; ++i)
-                    stack[i] = 0;
-                const unsigned long long rsp = build_user_stack(stack, launch);
-                if (rsp)
-                    return execute_image(image, stack, file->size - HEADER_SIZE,
-                        entry, rsp, launch);
-                page_free(stack);
-                failure = APP_BAD_ARGS;
-            } else {
-                failure = APP_NO_MEMORY;
-            }
+    struct app_info info;
+    const int valid = read_image(volume, file, image, &info);
+    enum app_status failure = valid < 0 ? APP_READ_ERROR : APP_INVALID;
+    if (valid > 0) {
+        unsigned char *stack = page_alloc();
+        if (stack) {
+            for (unsigned int i = 0; i < PAGE_SIZE; ++i)
+                stack[i] = 0;
+            const unsigned long long rsp = build_user_stack(stack, launch);
+            if (rsp)
+                return execute_image(image, stack, info.image_size, info.entry, rsp, launch);
+            page_free(stack);
+            failure = APP_BAD_ARGS;
+        } else {
+            failure = APP_NO_MEMORY;
         }
     }
     page_free(image);

@@ -2,6 +2,7 @@
 #define GPT_R_SHELL_INTERNAL_H
 
 #include "../drivers/console.h"
+#include "../fs/fat16.h"
 
 enum {
     WIDTH = CONSOLE_WIDTH, HEIGHT = CONSOLE_HEIGHT,
@@ -34,6 +35,13 @@ void shell_diskinfo(unsigned int *row, const unsigned char *argument);
 void shell_sector(unsigned int *row, const unsigned char *argument);
 void shell_ls(unsigned int *row, const unsigned char *argument);
 void shell_run_app(unsigned int *row, const unsigned char *argument);
+int shell_open_volume(unsigned int *row, struct ata_disk *disk, struct fat16_volume *volume);
+int shell_find_file(unsigned int *row, const struct fat16_volume *volume,
+    const unsigned char *name, struct fat16_file *file);
+void shell_report_file_edit(unsigned int *row, enum fat16_edit_result result,
+    const char *success);
+void shell_assemble(unsigned int *row, const unsigned char *argument);
+void shell_appinfo(unsigned int *row, const unsigned char *argument);
 void shell_cat(unsigned int *row, const unsigned char *argument);
 void shell_write(unsigned int *row, const unsigned char *argument);
 void shell_rm(unsigned int *row, const unsigned char *argument);

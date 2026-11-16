@@ -60,7 +60,7 @@ void shell_sector(unsigned int *row, const unsigned char *argument)
     shell_print_bytes(row, data);
 }
 
-static int open_volume(unsigned int *row, struct ata_disk *disk,
+int shell_open_volume(unsigned int *row, struct ata_disk *disk,
                        struct fat16_volume *volume)
 {
     if (!open_disk(row, disk))
@@ -104,7 +104,7 @@ void shell_ls(unsigned int *row, const unsigned char *argument)
     (void)argument;
     struct ata_disk disk;
     struct fat16_volume volume;
-    if (!open_volume(row, &disk, &volume))
+    if (!shell_open_volume(row, &disk, &volume))
         return;
 
     struct fat16_dir dir;
@@ -284,7 +284,7 @@ static void finish_text(struct text_output *output)
         shell_next_row(output->row);
 }
 
-static int find_file(unsigned int *row, const struct fat16_volume *volume,
+int shell_find_file(unsigned int *row, const struct fat16_volume *volume,
     const unsigned char *name, struct fat16_file *file)
 {
     struct fat16_dir dir;
@@ -308,7 +308,7 @@ void shell_cat(unsigned int *row, const unsigned char *argument)
     struct ata_disk disk;
     struct fat16_volume volume;
     struct fat16_file file;
-    if (!open_volume(row, &disk, &volume) || !find_file(row, &volume, name, &file))
+    if (!shell_open_volume(row, &disk, &volume) || !shell_find_file(row, &volume, name, &file))
         return;
 
     struct text_output output = {
@@ -400,7 +400,7 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
     struct ata_disk disk;
     struct fat16_volume volume;
     struct fat16_file file;
-    if (!open_volume(row, &disk, &volume) || !find_file(row, &volume, args, &file))
+    if (!shell_open_volume(row, &disk, &volume) || !shell_find_file(row, &volume, args, &file))
         return;
 
     const struct app_result result = app_run(&volume, &file, &launch);
@@ -440,19 +440,25 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
     }
 }
 
-static void edit_file(unsigned int *row, const unsigned char *argument, int remove)
+void shell_report_file_edit(unsigned int *row, enum fat16_edit_result result,
+    const char *success)
 {
     static const char *const errors[] = {
         [FAT16_EDIT_NAME] = "Use nome 8.3 sem misturar a caixa em cada parte",
         [FAT16_EDIT_TEXT_EXTENSION] = "Use .txt em minusculas",
         [FAT16_EDIT_CASE] = "Ja existe um nome com outra capitalizacao",
-        [FAT16_EDIT_SIZE] = "Texto maior que um setor",
+        [FAT16_EDIT_SIZE] = "Arquivo maior que a capacidade do FAT16",
         [FAT16_EDIT_MISSING] = "Arquivo nao encontrado",
         [FAT16_EDIT_PROTECTED] = "Entrada protegida ou com nome longo",
         [FAT16_EDIT_FULL] = "Disco ou diretorio cheio",
         [FAT16_EDIT_IO] = "Falha de disco ou FAT inconsistente",
         [FAT16_EDIT_CLEANUP] = "Diretorio atualizado; falha ao liberar clusters antigos"
     };
+    shell_print_line(row, result == FAT16_EDIT_OK ? success : errors[result]);
+}
+
+static void edit_file(unsigned int *row, const unsigned char *argument, int remove)
+{
     const unsigned char *name = shell_skip_spaces(argument);
     const unsigned char *end = name;
     while (*end && *end != ' ')
@@ -467,15 +473,12 @@ static void edit_file(unsigned int *row, const unsigned char *argument, int remo
 
     struct ata_disk disk;
     struct fat16_volume volume;
-    if (!open_volume(row, &disk, &volume))
+    if (!shell_open_volume(row, &disk, &volume))
         return;
     const enum fat16_edit_result result = remove ?
         fat16_remove(&volume, name, end - name) :
         fat16_write(&volume, name, end - name, data, length);
-    if (result == FAT16_EDIT_OK)
-        shell_print_line(row, remove ? "Arquivo removido" : "Arquivo salvo");
-    else
-        shell_print_line(row, errors[result]);
+    shell_report_file_edit(row, result, remove ? "Arquivo removido" : "Arquivo salvo");
 }
 
 void shell_write(unsigned int *row, const unsigned char *argument)

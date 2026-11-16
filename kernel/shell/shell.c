@@ -147,6 +147,8 @@ static const struct command {
     {"ls", "Lista arquivos FAT16", shell_ls, 0},
     {"cat", "Le texto com paginacao", shell_cat, 1},
     {"run", "Executa um .APP com argumentos", shell_run_app, 1},
+    {"asm", "Monta um fonte para .APP", shell_assemble, 1},
+    {"appinfo", "Mostra o cabecalho de um .APP", shell_appinfo, 1},
     {"write", "Cria ou sobrescreve um arquivo", shell_write, 1},
     {"rm", "Remove um arquivo", shell_rm, 1},
     {"color", "Muda as cores do terminal", command_color, 1},

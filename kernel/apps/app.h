@@ -12,6 +12,16 @@ struct app_result {
     unsigned long long exit_code, vector, rip, fault_address;
 };
 
+enum { APP_HEADER_SIZE = 32, APP_IMAGE_LIMIT = 4096, APP_FORMAT_VERSION = 1 };
+struct app_info {
+    unsigned int image_size, entry;
+};
+
+/* Returns 1 for a valid app, 0 for bad format and -1 on I/O error. */
+int app_inspect(const struct fat16_volume *volume, const struct fat16_file *file,
+    struct app_info *info);
+void app_make_header(unsigned char *header, unsigned int size, unsigned int entry);
+
 enum { APP_ARG_LIMIT = 40, APP_ARG_BYTES = 256 };
 
 struct app_launch {

@@ -240,7 +240,8 @@ enum fat16_edit_result fat16_write(const struct fat16_volume *vol,
     struct short_name name;
     if (!encode_name(&name, text_name, name_size))
         return FAT16_EDIT_NAME;
-    if (length > 512)
+    const unsigned int cluster_size = vol->sectors_per_cluster * 512;
+    if (length > (unsigned long long)vol->clusters * cluster_size)
         return FAT16_EDIT_SIZE;
 
     struct edit_entry entry;
@@ -255,19 +256,43 @@ enum fat16_edit_result fat16_write(const struct fat16_volume *vol,
     if (entry.exists && !valid_chain(vol, &entry))
         return FAT16_EDIT_IO;
 
-    unsigned int cluster = 0;
-    if (length) {
-        if (!find_free_cluster(vol, &cluster))
-            return FAT16_EDIT_IO;
-        if (!cluster)
-            return FAT16_EDIT_FULL;
+    unsigned int cluster = 0, tail = 0, written = 0;
+    while (written < length) {
+        unsigned int next;
+        if (!find_free_cluster(vol, &next)) {
+            result = FAT16_EDIT_IO;
+            break;
+        }
+        if (!next) {
+            result = FAT16_EDIT_FULL;
+            break;
+        }
+
+        const unsigned int first = vol->data_start + (next - 2) * vol->sectors_per_cluster;
         unsigned char sector[512];
-        for (unsigned int i = 0; i < 512; ++i)
-            sector[i] = i < length ? text[i] : 0;
-        const unsigned int lba = vol->data_start + (cluster - 2) * vol->sectors_per_cluster;
-        if (!ata_write_sector(vol->disk, lba, sector) ||
-            !fat_set(vol, cluster, 0, END_OF_CHAIN))
+        for (unsigned int i = 0; i < vol->sectors_per_cluster && written < length; ++i) {
+            for (unsigned int j = 0; j < 512; ++j)
+                sector[j] = written < length ? text[written++] : 0;
+            if (!ata_write_sector(vol->disk, first + i, sector)) {
+                result = FAT16_EDIT_IO;
+                break;
+            }
+        }
+        if (result != FAT16_EDIT_OK)
+            break;
+        if (!fat_set(vol, next, 0, END_OF_CHAIN) ||
+            (tail && !fat_set(vol, tail, END_OF_CHAIN, next))) {
+            result = FAT16_EDIT_IO;
+            break;
+        }
+        if (!cluster)
+            cluster = next;
+        tail = next;
+    }
+    if (result != FAT16_EDIT_OK) {
+        if (cluster && !release_chain(vol, cluster))
             return FAT16_EDIT_IO;
+        return result;
     }
 
     /* Publish the new chain before releasing the old one. */
