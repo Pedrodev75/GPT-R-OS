@@ -202,8 +202,8 @@ static unsigned char glyph_row(unsigned char ch, unsigned int row)
     return font[(ch < 128 ? ch : '?') * 8 + row];
 }
 
-void vga_graphics_overlay_glyph(unsigned int x, unsigned int y,
-    unsigned char glyph, unsigned int rgb)
+static void overlay_glyph(unsigned int x, unsigned int y,
+    unsigned char glyph, unsigned int rgb, unsigned int background)
 {
     if (x > WIDTH - VGA_OVERLAY_CELL_WIDTH || y > HEIGHT - VGA_OVERLAY_GLYPH_HEIGHT)
         return;
@@ -217,8 +217,22 @@ void vga_graphics_overlay_glyph(unsigned int x, unsigned int y,
                 (2 * VGA_OVERLAY_CELL_WIDTH);
             if (bits & (0x80 >> source_x))
                 put_pixel(pixels + col * 3, rgb);
+            else if (background <= 0xffffff)
+                put_pixel(pixels + col * 3, background);
         }
     }
+}
+
+void vga_graphics_overlay_glyph(unsigned int x, unsigned int y,
+    unsigned char glyph, unsigned int rgb)
+{
+    overlay_glyph(x, y, glyph, rgb, 0x1000000);
+}
+
+void vga_graphics_overlay_cell(unsigned int x, unsigned int y,
+    unsigned char glyph, unsigned int foreground, unsigned int background)
+{
+    overlay_glyph(x, y, glyph, foreground, background);
 }
 
 enum { DISPLAY_GLYPH_HEIGHT = VGA_LINE_HEIGHT - 1 };

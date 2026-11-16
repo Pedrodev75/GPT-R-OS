@@ -125,12 +125,13 @@ static void command_demo(unsigned int *row, const unsigned char *argument)
 #endif
 
 static void command_help(unsigned int *row, const unsigned char *argument);
+static void command_man(unsigned int *row, const unsigned char *argument);
 
 static const struct command {
     const char *name;
     const char *help;
     void (*run)(unsigned int *, const unsigned char *);
-    int takes_args;
+    const char *usage;
 } commands[] = {
     {"help", "Lista os comandos", command_help, 0},
     {"clear", "Limpa o terminal", command_clear, 0},
@@ -138,47 +139,85 @@ static const struct command {
     {"uptime", "Mostra o tempo ligado", command_uptime, 0},
     {"mem", "Mostra o mapa e o uso da memoria", shell_mem, 0},
     {"memtest", "Testa uma pagina de 4 KiB", shell_memtest, 0},
-    {"kmalloc", "Aloca um bloco (bytes em decimal)", shell_kmalloc, 1},
-    {"kfree", "Libera um bloco (endereco hexadecimal)", shell_kfree, 1},
-    {"peek", "Le 16 bytes de um endereco hexadecimal", shell_peek, 1},
+    {"kmalloc", "Aloca um bloco (bytes em decimal)", shell_kmalloc, "<bytes>"},
+    {"kfree", "Libera um bloco (endereco hexadecimal)", shell_kfree, "<endereco>"},
+    {"peek", "Le 16 bytes de um endereco hexadecimal", shell_peek, "<endereco>"},
     {"reboot", "Reinicia o sistema", command_reboot, 0},
     {"diskinfo", "Mostra o disco ATA", shell_diskinfo, 0},
-    {"sector", "Mostra 16 bytes de um setor", shell_sector, 1},
+    {"sector", "Mostra 16 bytes de um setor", shell_sector, "<LBA>"},
     {"ls", "Lista arquivos FAT16", shell_ls, 0},
-    {"cat", "Le texto com paginacao", shell_cat, 1},
-    {"run", "Executa um .APP com argumentos", shell_run_app, 1},
-    {"asm", "Monta um fonte para .APP", shell_assemble, 1},
-    {"appinfo", "Mostra o cabecalho de um .APP", shell_appinfo, 1},
+    {"cat", "Le texto com paginacao", shell_cat, "<arquivo>"},
+    {"run", "Executa um .APP com argumentos", shell_run_app, "<arquivo.APP> [argumentos]"},
+    {"asm", "Monta um fonte para .APP", shell_assemble, "<fonte.asm> <saida.APP>"},
+    {"appinfo", "Mostra o cabecalho de um .APP", shell_appinfo, "<arquivo.APP>"},
 #ifdef GPT_R_GRAPHICS
-    {"edit", "Abre o editor grafico de texto", shell_edit, 1},
+    {"edit", "Abre o editor grafico de texto", shell_edit, "<arquivo>"},
 #endif
-    {"write", "Cria ou sobrescreve um arquivo", shell_write, 1},
-    {"rm", "Remove um arquivo", shell_rm, 1},
-    {"color", "Muda as cores do terminal", command_color, 1},
-    {"crash", "Executa testes, incluindo crash heap", shell_crash, 1},
+    {"write", "Cria ou sobrescreve um arquivo", shell_write, "<arquivo> <texto>"},
+    {"rm", "Remove um arquivo", shell_rm, "<arquivo>"},
+    {"color", "Muda as cores do terminal", command_color, "<frente> <fundo>"},
+    {"crash", "Executa testes, incluindo crash heap", shell_crash, "<tipo>"},
 #ifdef GPT_R_GRAPHICS
     {"demo", "Abre a demonstracao VGA", command_demo, 0},
 #endif
+    {"man", "Mostra a sintaxe e a descricao", command_man, "<comando>"},
 };
 
 static void command_help(unsigned int *row, const unsigned char *argument)
 {
     (void)argument;
+    char line[WIDTH + 1];
+    unsigned int length = 0;
     for (unsigned int i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
-        char line[80];
-        unsigned int n = 0;
-        while (commands[i].name[n]) {
-            line[n] = commands[i].name[n];
-            ++n;
+        const struct command *command = &commands[i];
+        if (command->run == command_man)
+            continue;
+        const int second = length != 0;
+        if (second)
+            while (length < WIDTH / 2)
+                line[length++] = ' ';
+        for (const char *name = command->name; *name && length < WIDTH; ++name)
+            line[length++] = *name;
+        if (second) {
+            line[length] = 0;
+            shell_print_line(row, line);
+            length = 0;
         }
-        while (n < 9)
-            line[n++] = ' ';
-        const char *description = commands[i].help;
-        while (*description && n + 1 < sizeof(line))
-            line[n++] = *description++;
-        line[n] = 0;
+    }
+    if (length) {
+        line[length] = 0;
         shell_print_line(row, line);
     }
+    shell_print_line(row, "");
+    shell_print_line(row, "man <comando>  Mostra como usar um comando");
+}
+
+static void command_man(unsigned int *row, const unsigned char *argument)
+{
+    const unsigned char *name = shell_skip_spaces(argument);
+    if (!*name) {
+        shell_print_line(row, "Uso: man <comando>");
+        return;
+    }
+    for (unsigned int i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
+        const struct command *command = &commands[i];
+        if (!shell_equals(name, command->name))
+            continue;
+        char line[80];
+        unsigned int length = 0;
+        for (const char *p = command->name; *p; ++p)
+            line[length++] = *p;
+        if (command->usage) {
+            line[length++] = ' ';
+            for (const char *p = command->usage; *p && length < sizeof(line) - 1; ++p)
+                line[length++] = *p;
+        }
+        line[length] = 0;
+        shell_print_line(row, line);
+        shell_print_line(row, command->help);
+        return;
+    }
+    shell_print_line(row, "Comando desconhecido. Use help.");
 }
 
 enum { HISTORY_LIMIT = 16 };
@@ -230,7 +269,7 @@ static void execute(unsigned int *row, unsigned char *line, unsigned int length)
 
     for (unsigned int i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
         const unsigned char *argument = argument_for(line, commands[i].name);
-        if (argument && (commands[i].takes_args || !*argument)) {
+        if (argument && (commands[i].usage || !*argument)) {
             commands[i].run(row, argument);
             return;
         }
