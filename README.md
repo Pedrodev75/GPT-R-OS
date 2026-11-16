@@ -2,7 +2,7 @@
 
 Sistema operacional experimental x86-64 escrito em C e Assembly. Inicia via BIOS com bootloader próprio e é desenvolvido para testes no QEMU.
 
-A **v0.5.0** inicia direto pelo HD virtual, executa programas `.APP` em modo usuário e amplia os comandos de armazenamento FAT16. O terminal gráfico roda em 640×480 via VBE, com 49 colunas por 25 linhas.
+A **v0.5.5** permite escrever, montar, inspecionar e rodar programas `.APP` dentro do próprio sistema. Os programas em modo usuário podem receber argumentos e ler o teclado. O shell ganhou histórico, `man` e um editor gráfico. O terminal gráfico roda em 640×480 via VBE, com 49 colunas por 25 linhas.
 
 ## Rodar no QEMU
 
@@ -29,11 +29,12 @@ Se o kernel iniciar mas não conseguir montar o FAT16, o shell ainda abre.
 
 ## Shell
 
-Digite no prompt `>` e pressione **Enter**.
+Digite no prompt `>` e pressione **Enter**. Use **↑** e **↓** para navegar pelos últimos 16 comandos. Para consultar o uso de um comando, experimente `man edit`.
 
 | Comando | Resultado |
 |---|---|
-| `help` | Lista os comandos. |
+| `help` | Mostra os nomes dos comandos em duas colunas. |
+| `man <comando>` | Mostra a sintaxe e a descrição de um comando. |
 | `clear` | Limpa o terminal e preserva o cabeçalho. |
 | `version` | Mostra a versão do GPT-R OS. |
 | `uptime` | Mostra os segundos desde o boot. |
@@ -49,7 +50,10 @@ Digite no prompt `>` e pressione **Enter**.
 | `sector <LBA>` | Mostra os primeiros 16 bytes de um setor. Informe o LBA em decimal. |
 | `ls` | Lista os nomes, os tamanhos em bytes e as datas de modificação gravadas no diretório raiz do FAT16. |
 | `cat <arquivo>` | Exibe um arquivo de texto UTF-8 com paginação. |
-| `run <arquivo.APP>` | Executa um programa x86-64 em modo usuário. |
+| `run <arquivo.APP> [argumentos]` | Executa um programa x86-64 em modo usuário. **Ctrl+C** encerra o programa e volta ao prompt. |
+| `edit <arquivo>` | Abre o editor gráfico de texto UTF-8. |
+| `asm <fonte.asm> <saida.APP>` | Monta um fonte Assembly e grava um executável no FAT16. |
+| `appinfo <arquivo.APP>` | Valida e mostra o cabeçalho do executável. |
 | `write <arquivo> <texto>` | Cria ou sobrescreve um arquivo de texto UTF-8. Aceita os acentos digitáveis no layout ABNT2. |
 | `rm <arquivo>` | Remove um arquivo e libera seus clusters. |
 | `demo` | Abre a demonstração interativa de vídeo no modo gráfico. |
@@ -66,15 +70,19 @@ O FAT16 trabalha com o diretório raiz e nomes curtos 8.3. Digite o nome exatame
 
 Use `diskinfo` antes e depois de `write nota.txt Pão com ovo` para ver o espaço livre mudar. Leia o resultado com `cat nota.txt` e use `rm nota.txt` para liberar os clusters do arquivo. O comando `sector 0` inspeciona os primeiros bytes do MBR. Na imagem de exemplo, a partição FAT16 começa no setor 2048.
 
-### Programas em modo usuário
+### Crie um programa dentro do GPT-R OS
 
-| Comando | Resultado |
-|---|---|
-| `run ola.APP` | Exibe `Ola, GPT-R OS!`, mostra o código de saída 0 e retorna ao prompt. |
-| `run FALHA.APP` | Executa uma instrução inválida. O shell mostra o vetor 6 e volta ao prompt. |
-| `run INVALIDO.APP` | Recusa o cabeçalho inválido e volta ao prompt. |
+A imagem vem com `ola.APP`, `ola.asm` e `README.txt`. Abra `edit ola.asm` e mude a mensagem na linha com `db`. O editor mostra números de linha, cursor, rolagem e os atalhos no rodapé. Use **Ctrl+S** para salvar e **Esc** para voltar ao shell.
 
-O shell executa um programa por vez, em ring 3. O formato binário e o empacotador para Windows estão descritos em [Formato dos programas .APP](docs/app-format.md).
+```text
+asm ola.asm feito.APP
+appinfo feito.APP
+run feito.APP
+```
+
+O programa imprime a sua mensagem e sai com código 0. O montador suporta registradores de 32 e 64 bits, operações aritméticas, memória, saltos condicionais e rotinas com `call` e `ret`. Veja a sintaxe completa, um exemplo de leitura do teclado e os testes de exceção na [documentação do formato .APP](docs/app-format.md).
+
+O editor aceita texto UTF-8 de até 4 KiB e salva as quebras de linha em LF. Se houver alterações pendentes ao apertar **Esc**, ele oferece salvar, descartar ou continuar.
 
 ### Testar a persistência
 
@@ -104,7 +112,7 @@ Digite `write nota.txt Pão com ovo`, feche o QEMU e abra a mesma cópia de novo
 | `hang` | Desativa as interrupções mascaráveis e entra em loop. Reinicie a VM pelo QEMU para voltar ao prompt. |
 | `triple` | Carrega uma IDT vazia e provoca triple fault. Com as opções padrão, o QEMU reinicia a VM. |
 
-As exceções do kernel param na tela de diagnóstico. Ela mostra o vetor, o código de erro e os registradores. Para comparar `mem`, inicie o QEMU uma vez com `-m 64` e outra com `-m 128`.
+As exceções de um programa em modo usuário devolvem o prompt. As exceções do kernel param na tela de diagnóstico. Ela mostra o vetor, o código de erro e os registradores. Para comparar `mem`, inicie o QEMU uma vez com `-m 64` e outra com `-m 128`.
 
 ## Estrutura
 
@@ -112,15 +120,15 @@ As exceções do kernel param na tela de diagnóstico. Ela mostra o vetor, o có
 |---|---|
 | `boot/` | Bootloader BIOS, leitura do HD, configuração VBE, coleta E820 e layout da imagem. |
 | `kernel/kernel.c` | Inicializa o kernel, mostra o log de boot e chama o shell. |
-| `kernel/apps/` | Carregador `.APP`, execução em modo usuário e chamadas ao kernel. |
+| `kernel/apps/` | Carregador `.APP`, chamadas ao kernel, execução em modo usuário e montador. |
 | `kernel/memory/` | Paginação, mapa E820, alocador de páginas físicas e heap. |
 | `kernel/interrupts/` | IDT, entradas de IRQ e diagnóstico de exceções. |
 | `kernel/drivers/` | Teclado PS/2 ABNT2, timer PIT, console gráfico VBE e disco ATA PIO. |
 | `kernel/fs/` | Leitura e escrita de volumes FAT16. |
-| `kernel/shell/` | Prompt, tabela de comandos e módulos de saída, disco, memória e diagnóstico. |
+| `kernel/shell/` | Prompt, histórico, comandos, editor gráfico e módulos de disco, memória e diagnóstico. |
 | `apps/` | Código-fonte dos programas de exemplo. |
 | `tools/Pack-App.ps1` | Empacotador de executáveis `.APP` para Windows. |
-| `docs/app-format.md` | Formato do cabeçalho `GTRA` e chamadas ao kernel. |
+| `docs/app-format.md` | Formato `GTRA`, chamadas ao kernel, sintaxe do montador e exemplos. |
 
 ## Licença
 

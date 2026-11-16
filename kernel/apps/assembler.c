@@ -191,42 +191,217 @@ static int data_items(struct assembler *a, struct parser *parser)
     return 1;
 }
 
-static unsigned int mov_opcode(struct token reg)
+enum { WIDE = 8 };
+
+static int read_register(struct parser *parser)
 {
-    if (equals(reg, "eax"))
-        return 0xb8;
-    if (equals(reg, "edx"))
-        return 0xba;
-    if (equals(reg, "esi"))
-        return 0xbe;
-    if (equals(reg, "edi"))
-        return 0xbf;
-    return 0;
+    static const char *const names[] = {
+        "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi",
+        "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"
+    };
+    const struct token name = word(parser);
+    for (unsigned int i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+        if (equals(name, names[i]))
+            return i;
+    return -1;
+}
+
+static int prefix(struct assembler *a, int reg)
+{
+    return !(reg & WIDE) || emit(a, 0x48, 1);
+}
+
+static int reg_pair(struct assembler *a, int field, int operand)
+{
+    return emit(a, 0xc0 | ((field & 7) << 3) | (operand & 7), 1);
+}
+
+struct memory {
+    unsigned int base, offset;
+};
+
+/* The opening bracket has already been consumed. */
+static int read_memory(struct parser *parser, struct memory *memory)
+{
+    const int base = read_register(parser);
+    if (base < WIDE)
+        return 0;
+    memory->base = base & 7;
+    memory->offset = 0;
+    if (take(parser, '+')) {
+        if (!number(parser, &memory->offset) || memory->offset > 0x7fffffffu)
+            return 0;
+    } else if (take(parser, '-')) {
+        if (!number(parser, &memory->offset) || memory->offset > 0x80000000u)
+            return 0;
+        memory->offset = 0u - memory->offset;
+    }
+    return take(parser, ']');
+}
+
+static int emit_memory(struct assembler *a, int field, const struct memory *memory)
+{
+    const unsigned int base = memory->base;
+    const unsigned int offset = memory->offset;
+    unsigned int mode = 0;
+    if (offset || base == 5)
+        mode = offset <= 127 || offset >= 0xffffff80u ? 1 : 2;
+    return emit(a, (mode << 6) | ((field & 7) << 3) | base, 1) &&
+        (base != 4 || emit(a, 0x24, 1)) &&
+        (!mode || emit(a, offset, mode == 1 ? 1 : 4));
+}
+
+static int assemble_mov(struct assembler *a, struct parser *parser)
+{
+    struct memory memory;
+    if (take(parser, '[')) {
+        if (!read_memory(parser, &memory) || !take(parser, ','))
+            return 0;
+        const int reg = read_register(parser);
+        return reg >= 0 && prefix(a, reg) && emit(a, 0x89, 1) &&
+            emit_memory(a, reg, &memory);
+    }
+
+    const int dest = read_register(parser);
+    if (dest < 0 || !take(parser, ','))
+        return 0;
+    if (take(parser, '['))
+        return read_memory(parser, &memory) && prefix(a, dest) &&
+            emit(a, 0x8b, 1) && emit_memory(a, dest, &memory);
+
+    const unsigned char *start = parser->at;
+    const int src = read_register(parser);
+    if (src >= 0)
+        return (dest & WIDE) == (src & WIDE) && prefix(a, dest) &&
+            emit(a, 0x89, 1) && reg_pair(a, src, dest);
+
+    parser->at = start;
+    unsigned int value;
+    if (!immediate(a, parser, &value))
+        return 0;
+    if (dest & WIDE)
+        return prefix(a, dest) && emit(a, 0xc7, 1) &&
+            reg_pair(a, 0, dest) && emit(a, value, 4);
+    return emit(a, 0xb8 + dest, 1) && emit(a, value, 4);
+}
+
+struct binary_opcode {
+    const char *name;
+    unsigned int opcode, immediate_opcode, group;
+};
+
+static int assemble_binary(struct assembler *a, struct parser *parser,
+    const struct binary_opcode *op)
+{
+    const int dest = read_register(parser);
+    if (dest < 0 || !take(parser, ',') || !prefix(a, dest))
+        return 0;
+    const unsigned char *start = parser->at;
+    const int src = read_register(parser);
+    if (src >= 0) {
+        if ((dest & WIDE) != (src & WIDE))
+            return 0;
+        if (op->opcode == 0xaf0f)
+            return emit(a, op->opcode, 2) && reg_pair(a, dest, src);
+        return emit(a, op->opcode, 1) && reg_pair(a, src, dest);
+    }
+    parser->at = start;
+    unsigned int value;
+    return op->immediate_opcode && immediate(a, parser, &value) &&
+        emit(a, op->immediate_opcode, 1) && reg_pair(a, op->group, dest) &&
+        emit(a, value, 4);
+}
+
+struct named_opcode {
+    const char *name;
+    unsigned int opcode;
+};
+
+struct unary_opcode {
+    const char *name;
+    unsigned int opcode;
+    int group;
+};
+
+static int assemble_jump(struct assembler *a, struct parser *parser, unsigned int opcode)
+{
+    unsigned int target;
+    return label_value(a, parser, &target) &&
+        emit(a, opcode, opcode > 255 ? 2 : 1) &&
+        emit(a, target - (a->offset + 4), 4);
 }
 
 static const char *instruction(struct assembler *a, struct parser *parser,
     struct token op)
 {
+    static const struct binary_opcode binary[] = {
+        {"add", 0x01, 0x81, 0}, {"or", 0x09, 0x81, 1},
+        {"and", 0x21, 0x81, 4}, {"sub", 0x29, 0x81, 5},
+        {"xor", 0x31, 0x81, 6}, {"cmp", 0x39, 0x81, 7},
+        {"test", 0x85, 0xf7, 0}, {"imul", 0xaf0f, 0, 0}
+    };
+    static const struct named_opcode jumps[] = {
+        {"jmp", 0xe9}, {"call", 0xe8},
+        {"je", 0x840f}, {"jz", 0x840f}, {"jne", 0x850f}, {"jnz", 0x850f},
+        {"jl", 0x8c0f}, {"jge", 0x8d0f}, {"jle", 0x8e0f}, {"jg", 0x8f0f},
+        {"jb", 0x820f}, {"jae", 0x830f}, {"jbe", 0x860f}, {"ja", 0x870f}
+    };
+    static const struct named_opcode no_operand[] = {
+        {"nop", 0x90}, {"ud2", 0x0b0f}, {"int3", 0xcc}, {"hlt", 0xf4}, {"ret", 0xc3}
+    };
+    static const struct unary_opcode unary[] = {
+        {"inc", 0xff, 0}, {"dec", 0xff, 1}, {"div", 0xf7, 6}, {"idiv", 0xf7, 7},
+        {"push", 0x50, -1}, {"pop", 0x58, -1}
+    };
+    const char *bad_operand = "operando, rotulo ou tamanho invalido";
+    for (unsigned int i = 0; i < sizeof(binary) / sizeof(binary[0]); ++i)
+        if (equals(op, binary[i].name))
+            return assemble_binary(a, parser, &binary[i]) ? 0 : bad_operand;
+    for (unsigned int i = 0; i < sizeof(jumps) / sizeof(jumps[0]); ++i)
+        if (equals(op, jumps[i].name))
+            return assemble_jump(a, parser, jumps[i].opcode) ? 0 : bad_operand;
+    for (unsigned int i = 0; i < sizeof(no_operand) / sizeof(no_operand[0]); ++i)
+        if (equals(op, no_operand[i].name))
+            return emit(a, no_operand[i].opcode, no_operand[i].opcode > 255 ? 2 : 1) ?
+                0 : bad_operand;
+    for (unsigned int i = 0; i < sizeof(unary) / sizeof(unary[0]); ++i) {
+        if (!equals(op, unary[i].name))
+            continue;
+        const int reg = read_register(parser);
+        const struct unary_opcode *operation = &unary[i];
+        if (reg < 0)
+            return bad_operand;
+        if (operation->group < 0)
+            return reg >= WIDE && emit(a, operation->opcode + (reg & 7), 1) ?
+                0 : bad_operand;
+        return prefix(a, reg) && emit(a, operation->opcode, 1) &&
+            reg_pair(a, operation->group, reg) ? 0 : bad_operand;
+    }
+
     unsigned int value;
     int ok;
     if (equals(op, "mov")) {
-        const unsigned int opcode = mov_opcode(word(parser));
-        ok = opcode && take(parser, ',') && immediate(a, parser, &value) &&
-            emit(a, opcode, 1) && emit(a, value, 4);
+        ok = assemble_mov(a, parser);
+    } else if (equals(op, "movzx")) {
+        const int dest = read_register(parser);
+        struct memory memory;
+        ok = dest >= 0 && take(parser, ',') && equals(word(parser), "byte");
+        if (ok) {
+            const unsigned char *start = parser->at;
+            if (!equals(word(parser), "ptr"))
+                parser->at = start;
+            ok = take(parser, '[') && read_memory(parser, &memory) && prefix(a, dest) &&
+                emit(a, 0xb60f, 2) && emit_memory(a, dest, &memory);
+        }
     } else if (equals(op, "lea")) {
-        ok = equals(word(parser), "rdi") && take(parser, ',') && take(parser, '[') &&
+        const int dest = read_register(parser);
+        ok = dest >= WIDE && take(parser, ',') && take(parser, '[') &&
             equals(word(parser), "rip") && take(parser, '+') &&
             label_value(a, parser, &value) && take(parser, ']') &&
-            emit(a, 0x3d8d48, 3) && emit(a, value - (a->offset + 4), 4);
-    } else if (equals(op, "jmp")) {
-        ok = label_value(a, parser, &value) && emit(a, 0xe9, 1) &&
+            emit(a, 0x8d48, 2) && emit(a, ((dest & 7) << 3) | 5, 1) &&
             emit(a, value - (a->offset + 4), 4);
     } else if (equals(op, "int")) {
         ok = number(parser, &value) && value == 0x80 && emit(a, 0x80cd, 2);
-    } else if (equals(op, "nop")) {
-        ok = emit(a, 0x90, 1);
-    } else if (equals(op, "ud2")) {
-        ok = emit(a, 0x0b0f, 2);
     } else if (equals(op, "db")) {
         ok = data_items(a, parser);
     } else if (equals(op, "entry")) {
@@ -237,7 +412,7 @@ static const char *instruction(struct assembler *a, struct parser *parser,
     } else {
         return "instrucao desconhecida";
     }
-    return ok ? 0 : "operando, rotulo ou tamanho invalido";
+    return ok ? 0 : bad_operand;
 }
 
 static int at_end(struct parser *parser)

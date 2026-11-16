@@ -62,13 +62,61 @@ O comando `asm` monta um subconjunto da sintaxe Intel x86-64. O fonte e a imagem
 
 | Sintaxe | Operação |
 |---|---|
-| `rotulo:` | Define um endereço para saltos, dados e ponto de entrada. |
-| `entry rotulo` | Define o ponto de entrada. Sem a diretiva, o início do código é a entrada. |
-| `mov eax, 1` | Carrega um imediato de 32 bits em `eax`, `edx`, `edi` ou `esi`. Aceita decimal, hexadecimal com `0x` e diferença de rótulos, como `fim - mensagem`. |
-| `lea rdi, [rip + rotulo]` | Coloca o endereço de um rótulo em `rdi`. |
+| `rotulo:`, `entry rotulo` | Define um endereço e, opcionalmente, o ponto de entrada. Por padrão a entrada é o primeiro byte do código. |
+| `mov eax, 1`, `mov rdi, rsp` | Move um imediato ou copia entre registradores de mesma largura. Aceita decimal, hexadecimal com `0x` e diferenças de rótulos como `fim - mensagem`. |
+| `mov rsi, [rsp + 8]`, `mov [rsp - 8], rax` | Lê ou grava 32 ou 64 bits na memória, conforme o registrador. O endereço aceita um registrador de 64 bits com deslocamento opcional. |
+| `movzx eax, byte [rdi]` | Lê um byte e preenche o restante do registrador com zeros. |
+| `lea rdi, [rip + rotulo]` | Coloca o endereço de um rótulo em um registrador de 64 bits. |
+| `add`, `sub`, `and`, `or`, `xor`, `cmp`, `test` | Operam entre dois registradores de mesma largura ou entre um registrador e um imediato. |
+| `inc`, `dec`, `imul` | Incrementa ou decrementa um registrador. `imul` multiplica dois registradores de mesma largura e guarda o resultado no primeiro. |
+| `div`, `idiv` | Divide pelo registrador indicado. `div` usa divisão sem sinal e `idiv` usa divisão com sinal. O dividendo fica em `EDX:EAX` ou `RDX:RAX` conforme a largura. |
+| `jmp`, `jz`/`je`, `jnz`/`jne` | Saltos para rótulos. Os condicionais testam se o resultado anterior foi zero ou diferente de zero. |
+| `jl`, `jle`, `jg`, `jge` | Saltos para comparações com sinal. |
+| `jb`, `jbe`, `ja`, `jae` | Saltos para comparações sem sinal. |
+| `call rotulo`, `ret` | Chama uma rotina e volta ao ponto seguinte à chamada. Para sair do programa, use a chamada de sistema `exit`. |
+| `push rax`, `pop rax` | Empilha ou desempilha um registrador de 64 bits. |
 | `int 0x80` | Chama o kernel. |
-| `jmp rotulo` | Salta para um rótulo. |
-| `nop`, `ud2` | Operação vazia ou instrução inválida para diagnóstico. |
+| `nop`, `ud2`, `int3`, `hlt` | Operação vazia e instruções para testar exceções. |
 | `db "Texto", 10` | Grava strings e números de 0 a 255 como bytes. |
 
+Os registradores aceitos são `eax`, `ecx`, `edx`, `ebx`, `esp`, `ebp`, `esi`, `edi` e as versões de 64 bits de `rax` a `rdi`. Os imediatos têm 32 bits. Em operações de 64 bits, a CPU estende o sinal do imediato.
+
 O montador informa a linha do erro e só grava a saída depois de montar o fonte inteiro. O `appinfo` verifica a assinatura, os campos do cabeçalho e o tamanho do arquivo antes de mostrar a versão do formato e o ponto de entrada.
+
+### Exemplo com entrada do teclado
+
+Crie `eco.asm` com `edit eco.asm` e escreva:
+
+```asm
+    sub rsp, 128
+    mov rdi, rsp
+    mov esi, 128
+    mov eax, 3
+    int 0x80
+
+    test eax, eax
+    jle sair
+    mov esi, eax
+    mov rdi, rsp
+    mov eax, 1
+    int 0x80
+
+sair:
+    xor edi, edi
+    mov eax, 2
+    int 0x80
+```
+
+Salve, saia do editor e rode `asm eco.asm eco.APP` seguido de `run eco.APP`. Digite uma linha e pressione Enter. O programa imprime o texto digitado.
+
+### Testar exceções em modo usuário
+
+Monte um programa separado para cada teste. O shell mostra o vetor e retoma o prompt quando o programa sofre a exceção.
+
+| Fonte do teste | Exceção esperada |
+|---|---|
+| `mov ecx, 0` e depois `div ecx` | Divisão por zero, vetor 0 (`#DE`). |
+| `int3` | Breakpoint, vetor 3 (`#BP`). |
+| `ud2` | Instrução inválida, vetor 6 (`#UD`). |
+| `hlt` | Instrução privilegiada em ring 3, vetor 13 (`#GP`). |
+| `xor edi, edi` e depois `mov eax, [rdi]` | Acesso a endereço inacessível para o programa, vetor 14 (`#PF`). |
