@@ -46,6 +46,7 @@ struct process {
     struct app_frame frame;
     unsigned char fpu[512] __attribute__((aligned(16)));
     enum process_state state;
+    unsigned int pid;
     unsigned char *image, *stack;
     unsigned int image_size, read_offset, read_capacity;
     void (*output)(void *, const unsigned char *, unsigned int);
@@ -55,7 +56,7 @@ struct process {
 
 static struct process processes[APP_PROCESS_LIMIT];
 static struct process *running;
-static unsigned int next_slot;
+static unsigned int next_slot, next_pid;
 
 static unsigned long long enable_nx(void)
 {
@@ -84,8 +85,11 @@ void app_init(void)
     __asm__ volatile ("ltr %w0" : : "r"((unsigned short)0x28) : "memory");
     running = 0;
     next_slot = 0;
-    for (unsigned int i = 0; i < APP_PROCESS_LIMIT; ++i)
+    next_pid = 1;
+    for (unsigned int i = 0; i < APP_PROCESS_LIMIT; ++i) {
         processes[i].state = UNUSED;
+        processes[i].pid = 0;
+    }
     for (unsigned int i = 0; i < 512; ++i)
         directory[i] = table[i] = 0;
     directory[0] = (unsigned long long)table | PRESENT | WRITABLE | USER;
@@ -246,6 +250,28 @@ static void dispatch(struct process *process)
         release_pages(process);
 }
 
+static unsigned int allocate_pid(void)
+{
+    for (;;) {
+        unsigned int pid = next_pid++;
+        if (!pid)
+            continue;
+        unsigned int i = 0;
+        while (i < APP_PROCESS_LIMIT && processes[i].pid != pid)
+            ++i;
+        if (i == APP_PROCESS_LIMIT)
+            return pid;
+    }
+}
+
+struct app_task_info app_task_info(unsigned int slot)
+{
+    const struct process *process = &processes[slot];
+    const enum app_task_state state = process->state == READY ? APP_TASK_RUNNING :
+        process->state == WAITING ? APP_TASK_WAITING : APP_TASK_FINISHED;
+    return (struct app_task_info){ .pid = process->pid, .state = state };
+}
+
 enum app_status app_start(unsigned int slot, const struct fat16_volume *volume,
     const struct fat16_file *file, const struct app_launch *launch)
 {
@@ -273,7 +299,7 @@ enum app_status app_start(unsigned int slot, const struct fat16_volume *volume,
                 *process = (struct process){
                     .frame = { .rip = USER_IMAGE + info.entry, .cs = 0x23,
                         .flags = 0x202, .rsp = rsp, .ss = 0x1b },
-                    .state = READY, .image = image, .stack = stack, .image_size = info.image_size,
+                    .state = READY, .pid = allocate_pid(), .image = image, .stack = stack, .image_size = info.image_size,
                     .output = launch->output, .context = launch->context
                 };
                 /* FXSAVE layout: x87 control word 0x037f, MXCSR 0x1f80. */
@@ -411,6 +437,7 @@ void app_release(unsigned int slot)
 {
     app_cancel(slot);
     processes[slot].state = UNUSED;
+    processes[slot].pid = 0;
 }
 
 #ifndef GPT_R_GRAPHICS

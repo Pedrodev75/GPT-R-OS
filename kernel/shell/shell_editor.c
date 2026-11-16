@@ -36,7 +36,7 @@ static struct editor edit_state;
 static struct ata_disk current_disk;
 static struct fat16_volume current_volume;
 static unsigned char filename[13];
-static unsigned int filename_size, client_x, client_y;
+static unsigned int filename_size, current_directory, client_x, client_y;
 
 static unsigned int decode(const unsigned char *text, unsigned int available,
     unsigned int *codepoint)
@@ -494,7 +494,7 @@ static int save_file(struct editor *edit, const struct fat16_volume *volume,
     const unsigned char *name, unsigned int name_size)
 {
     const enum fat16_edit_result result =
-        fat16_write(volume, name, name_size, document, edit->length);
+        fat16_write_at(volume, current_directory, name, name_size, document, edit->length);
     if (result == FAT16_EDIT_OK || result == FAT16_EDIT_CLEANUP) {
         edit->changed = 0;
         edit->exists = 1;
@@ -564,51 +564,34 @@ int shell_editor_key(unsigned int key)
     return 0;
 }
 
-void shell_edit(unsigned int *row, const unsigned char *argument)
+const char *shell_edit_file(const struct fat16_volume *volume, unsigned int directory,
+    const unsigned char *name, const struct fat16_file *file)
 {
-    const unsigned char *name = shell_skip_spaces(argument);
     unsigned int name_size = 0;
     while (name[name_size] && name[name_size] != ' ')
         ++name_size;
-    if (!name_size || name_size > 12 || name[name_size]) {
-        shell_print_line(row, "Uso: edit <arquivo>");
-        return;
-    }
+    if (!name_size || name_size > 12 || name[name_size])
+        return "Uso: edit <arquivo>";
 
-    if (filename_size && shell_equals(name, (const char *)filename)) {
+    if (filename_size && current_directory == directory &&
+        shell_equals(name, (const char *)filename)) {
         desktop_open_editor(filename);
-        return;
+        return 0;
     }
     if (filename_size && edit_state.changed) {
         edit_state.notice = "Salve o documento atual primeiro";
         desktop_open_editor(filename);
-        return;
+        return 0;
     }
 
-    struct ata_disk disk;
-    struct fat16_volume volume;
-    struct fat16_file file;
-    if (!shell_open_volume(row, &disk, &volume))
-        return;
-    const int found = shell_lookup_file(&volume, name, &file);
-    if (found < 0) {
-        shell_print_line(row, "Falha ao ler diretorio");
-        return;
-    }
-    struct editor edit = { .exists = found };
-    if (found) {
-        if (file.size > sizeof(document)) {
-            shell_print_line(row, "Limite do editor: 4 KiB");
-            return;
-        }
-        if (fat16_read(&volume, &file, load_chunk, &edit) != FAT16_READ_OK) {
-            shell_print_line(row, "Falha ao ler arquivo");
-            return;
-        }
-        if (!normalize_text(&edit)) {
-            shell_print_line(row, "O editor precisa de um arquivo de texto UTF-8");
-            return;
-        }
+    struct editor edit = { .exists = file != 0 };
+    if (file) {
+        if (file->size > sizeof(document))
+            return "Limite do editor: 4 KiB";
+        if (fat16_read(volume, file, load_chunk, &edit) != FAT16_READ_OK)
+            return "Falha ao ler arquivo";
+        if (!normalize_text(&edit))
+            return "O editor precisa de um arquivo de texto UTF-8";
     }
 
     for (unsigned int i = 0; i < edit.length; ++i)
@@ -616,11 +599,35 @@ void shell_edit(unsigned int *row, const unsigned char *argument)
     for (unsigned int i = 0; i <= name_size; ++i)
         filename[i] = name[i];
     filename_size = name_size;
-    current_disk = disk;
-    current_volume = volume;
+    current_directory = directory;
+    current_disk = *volume->disk;
+    current_volume = *volume;
     current_volume.disk = &current_disk;
     edit_state = edit;
     desktop_open_editor(filename);
+    return 0;
+}
+
+void shell_edit(unsigned int *row, const unsigned char *argument)
+{
+    const unsigned char *name = shell_skip_spaces(argument);
+    if (!*name) {
+        shell_print_line(row, "Uso: edit <arquivo>");
+        return;
+    }
+    struct ata_disk disk;
+    struct fat16_volume volume;
+    if (!shell_open_volume(row, &disk, &volume))
+        return;
+    struct fat16_file file;
+    const int found = fat16_lookup_at(&volume, 0, name, &file);
+    if (found < 0) {
+        shell_print_line(row, "Falha ao ler diretorio");
+        return;
+    }
+    const char *error = shell_edit_file(&volume, 0, name, found ? &file : 0);
+    if (error)
+        shell_print_line(row, error);
 }
 
 #endif

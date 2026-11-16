@@ -108,8 +108,7 @@ void shell_ls(unsigned int *row, const unsigned char *argument)
     if (!shell_open_volume(row, &disk, &volume))
         return;
 
-    struct fat16_dir dir;
-    dir.index = 0;
+    struct fat16_dir dir = {0};
     struct fat16_file file;
     int result, found = 0;
     while ((result = fat16_next(&volume, &dir, &file)) > 0) {
@@ -288,13 +287,7 @@ static void finish_text(struct text_output *output)
 int shell_lookup_file(const struct fat16_volume *volume,
     const unsigned char *name, struct fat16_file *file)
 {
-    struct fat16_dir dir;
-    dir.index = 0;
-    int result;
-    while ((result = fat16_next(volume, &dir, file)) > 0)
-        if (shell_equals(name, file->name))
-            return 1;
-    return result;
+    return fat16_lookup_at(volume, 0, name, file);
 }
 
 int shell_find_file(unsigned int *row, const struct fat16_volume *volume,
@@ -475,7 +468,8 @@ void shell_report_file_edit(unsigned int *row, enum fat16_edit_result result,
         [FAT16_EDIT_PROTECTED] = "Entrada protegida ou com nome longo",
         [FAT16_EDIT_FULL] = "Disco ou diretorio cheio",
         [FAT16_EDIT_IO] = "Falha de disco ou FAT inconsistente",
-        [FAT16_EDIT_CLEANUP] = "Diretorio atualizado; falha ao liberar clusters antigos"
+        [FAT16_EDIT_CLEANUP] = "Diretorio atualizado; falha ao liberar clusters antigos",
+        [FAT16_EDIT_EXISTS] = "Nome ja existe"
     };
     shell_print_line(row, result == FAT16_EDIT_OK ? success : errors[result]);
 }

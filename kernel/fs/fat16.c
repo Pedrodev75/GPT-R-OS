@@ -1,4 +1,4 @@
-#include "fat16.h"
+#include "fat16_internal.h"
 
 static unsigned int little16(const unsigned char* bytes)
 {
@@ -70,43 +70,125 @@ static char name_char(unsigned char ch, int lower)
     return lower && ch >= 'A' && ch <= 'Z' ? ch + ('a' - 'A') : ch;
 }
 
-int fat16_next(const struct fat16_volume* volume, struct fat16_dir* dir,
-    struct fat16_file* file)
+int fat16_get_link(const struct fat16_volume *volume, unsigned int cluster, unsigned int *next)
 {
-    while (dir->index < volume->root_entries) {
-        const unsigned int index = dir->index;
-        if (!(index % 16) &&
-            !ata_read_sector(volume->disk, volume->root_start + index / 16, dir->sector))
-            return -1;
-        ++dir->index;
-        const unsigned char* entry = dir->sector + (index % 16) * 32;
-        if (!entry[0]) {
-            dir->index = volume->root_entries;
-            return 0;
-        }
-        /* Ignore deleted, volume-label, long-name and subdirectory entries. */
-        if (entry[0] == 0xe5 || (entry[11] & 0x18))
-            continue;
+    unsigned char sector[ATA_SECTOR_SIZE];
+    if (!ata_read_sector(volume->disk, volume->fat_start + cluster / 256, sector))
+        return 0;
+    *next = little16(sector + (cluster % 256) * 2);
+    return 1;
+}
 
-        unsigned int length = 0;
-        unsigned int base = 8, extension = 3;
-        while (base && entry[base - 1] == ' ')
-            --base;
-        while (extension && entry[8 + extension - 1] == ' ')
-            --extension;
-        for (unsigned int i = 0; i < base; ++i)
-            file->name[length++] = name_char(entry[i], entry[12] & FAT16_LOWER_BASE);
-        if (extension)
-            file->name[length++] = '.';
-        for (unsigned int i = 0; i < extension; ++i)
-            file->name[length++] = name_char(entry[8 + i], entry[12] & FAT16_LOWER_EXTENSION);
-        file->name[length] = 0;
-        file->modified_date = little16(entry + 24);
-        file->first_cluster = little16(entry + 26);
-        file->size = little32(entry + 28);
-        return 1;
+int fat16_slot(const struct fat16_volume *volume, struct fat16_dir *dir,
+    const unsigned char **slot)
+{
+    if (dir->ended)
+        return 0;
+    if (!dir->first_cluster && dir->index >= volume->root_entries)
+        return 0;
+    if (!(dir->index % 16)) {
+        unsigned int lba = volume->root_start + dir->index / 16;
+        if (dir->first_cluster) {
+            if (!dir->index) {
+                dir->cluster = dir->cycle_anchor = dir->first_cluster;
+                dir->cycle_period = 1;
+            } else if (++dir->cluster_sector == volume->sectors_per_cluster) {
+                unsigned int next;
+                if (!fat16_get_link(volume, dir->cluster, &next))
+                    return -1;
+                if (next >= 0xfff8) {
+                    dir->ended = 1;
+                    return 0;
+                }
+                if (next == dir->cycle_anchor || ++dir->links >= volume->clusters)
+                    return -1;
+                if (++dir->cycle_span == dir->cycle_period) {
+                    dir->cycle_anchor = next;
+                    dir->cycle_span = 0;
+                    dir->cycle_period *= 2;
+                }
+                dir->cluster = next;
+                dir->cluster_sector = 0;
+            }
+            if (!fat16_cluster_valid(volume, dir->cluster))
+                return -1;
+            lba = fat16_cluster_lba(volume, dir->cluster) + dir->cluster_sector;
+        }
+        if (!ata_read_sector(volume->disk, lba, dir->sector))
+            return -1;
+        dir->lba = lba;
     }
-    return 0;
+    *slot = dir->sector + (dir->index++ % 16) * 32;
+    if (!(*slot)[0])
+        dir->ended = 1;
+    return 1;
+}
+
+static int decode_entry(const unsigned char *entry, struct fat16_file *file)
+{
+    if (!entry[0] || entry[0] == 0xe5 || entry[0] == '.' || (entry[11] & 0x08))
+        return 0;
+    unsigned int length = 0;
+    unsigned int base = 8, extension = 3;
+    while (base && entry[base - 1] == ' ')
+        --base;
+    while (extension && entry[8 + extension - 1] == ' ')
+        --extension;
+    for (unsigned int i = 0; i < base; ++i)
+        file->name[length++] = name_char(entry[i], entry[12] & FAT16_LOWER_BASE);
+    if (extension)
+        file->name[length++] = '.';
+    for (unsigned int i = 0; i < extension; ++i)
+        file->name[length++] = name_char(entry[8 + i], entry[12] & FAT16_LOWER_EXTENSION);
+    file->name[length] = 0;
+    file->modified_date = little16(entry + 24);
+    file->first_cluster = little16(entry + 26);
+    file->size = little32(entry + 28);
+    file->is_directory = !!(entry[11] & 0x10);
+    return 1;
+}
+
+enum fat16_scan_result fat16_scan(const struct fat16_volume *volume,
+    struct fat16_dir *dir, struct fat16_file *file)
+{
+    const unsigned char *slot;
+    const int result = fat16_slot(volume, dir, &slot);
+    if (result <= 0)
+        return result;
+    return decode_entry(slot, file) ? FAT16_SCAN_ENTRY : FAT16_SCAN_SKIP;
+}
+
+int fat16_next_at(const struct fat16_volume *volume, struct fat16_dir *dir,
+    struct fat16_file *file)
+{
+    enum fat16_scan_result result;
+    do {
+        result = fat16_scan(volume, dir, file);
+    } while (result == FAT16_SCAN_SKIP);
+    return result;
+}
+
+int fat16_next(const struct fat16_volume *volume, struct fat16_dir *dir,
+    struct fat16_file *file)
+{
+    int result;
+    while ((result = fat16_next_at(volume, dir, file)) > 0 && file->is_directory) {}
+    return result;
+}
+
+int fat16_lookup_at(const struct fat16_volume *volume, unsigned int directory,
+    const unsigned char *name, struct fat16_file *file)
+{
+    struct fat16_dir dir = { .first_cluster = directory };
+    int result;
+    while ((result = fat16_next(volume, &dir, file)) > 0) {
+        unsigned int i = 0;
+        while (name[i] && name[i] == (unsigned char)file->name[i])
+            ++i;
+        if (!name[i] && !file->name[i])
+            break;
+    }
+    return result;
 }
 
 int fat16_space(const struct fat16_volume *volume, unsigned int *total,
@@ -139,10 +221,9 @@ enum fat16_read_result fat16_read(const struct fat16_volume* volume, const struc
         return FAT16_READ_ERROR;
 
     while (remaining) {
-        if (cluster < 2 || cluster >= volume->clusters + 2 || cluster >= 0xfff0)
+        if (!fat16_cluster_valid(volume, cluster))
             return FAT16_READ_ERROR;
-        const unsigned int first = volume->data_start +
-            (cluster - 2) * volume->sectors_per_cluster;
+        const unsigned int first = fat16_cluster_lba(volume, cluster);
         for (unsigned int i = 0; i < volume->sectors_per_cluster && remaining; ++i) {
             if (!ata_read_sector(volume->disk, first + i, data))
                 return FAT16_READ_ERROR;

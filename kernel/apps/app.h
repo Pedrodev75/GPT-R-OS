@@ -38,6 +38,13 @@ enum { APP_PROCESS_LIMIT = 4 };
 
 enum app_status app_start(unsigned int slot, const struct fat16_volume *volume,
     const struct fat16_file *file, const struct app_launch *launch);
+enum app_task_state { APP_TASK_RUNNING, APP_TASK_WAITING, APP_TASK_FINISHED };
+struct app_task_info {
+    unsigned int pid;
+    enum app_task_state state;
+};
+
+struct app_task_info app_task_info(unsigned int slot);
 int app_ready(void);
 void app_schedule(void);
 unsigned int app_read_capacity(unsigned int slot);

@@ -159,7 +159,7 @@ void app_window_update(unsigned int slot)
         next_row(console);
         break;
     case APP_INTERRUPTED:
-        print(console, "Interrompido (Ctrl+C)");
+        print(console, "Programa interrompido");
         next_row(console);
         break;
     case APP_FAULTED:
