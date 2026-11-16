@@ -6,7 +6,7 @@ struct mouse_event {
     unsigned char buttons;
 };
 
-enum { MOUSE_LEFT = 1 };
+enum { MOUSE_LEFT = 1, MOUSE_RIGHT = 2 };
 
 int mouse_init(void);
 int mouse_poll(struct mouse_event *event);

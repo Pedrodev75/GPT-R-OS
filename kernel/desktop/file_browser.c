@@ -2,6 +2,7 @@
 
 #ifdef GPT_R_GRAPHICS
 #include "desktop.h"
+#include "shortcuts.h"
 #include "tool_view.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/timer.h"
@@ -9,7 +10,8 @@
 
 enum {
     PATH_DEPTH = 16, FILE_ROWS = 9, FILE_ROW_HEIGHT = 36, TABLE_TOP = 122,
-    SCAN_BUDGET = 16, NO_SELECTION = FILE_ROWS, DOUBLE_CLICK_TICKS = 35
+    SCAN_BUDGET = 16, NO_SELECTION = FILE_ROWS, DOUBLE_CLICK_TICKS = 35,
+    CONTEXT_WIDTH = 238, CONTEXT_HEIGHT = 40
 };
 
 struct folder {
@@ -30,10 +32,10 @@ static struct {
     struct fat16_file files[FILE_ROWS];
     unsigned int count, selected, previous_click, click_tick;
     unsigned int page, skip, seen_mutations, history_start, history_count;
-    unsigned int name_length;
+    unsigned int name_length, context_x, context_y;
     unsigned char new_name[9];
     const char *notice;
-    int mounted, loading, more, naming;
+    int mounted, loading, more, naming, context_open;
 } browser;
 
 static unsigned int current_folder_cluster(void)
@@ -49,7 +51,7 @@ static void scan_page(unsigned int page)
     browser.page = page;
     browser.count = 0;
     browser.selected = browser.previous_click = NO_SELECTION;
-    browser.more = 0;
+    browser.more = browser.context_open = 0;
     browser.loading = browser.mounted;
     browser.seen_mutations = fat16_mutations();
 }
@@ -70,8 +72,12 @@ int browser_busy(void)
 
 int browser_step(void)
 {
-    if (browser.seen_mutations != fat16_mutations())
-        scan_page(0);
+    if (browser.seen_mutations != fat16_mutations()) {
+        if (fat16_dir_changed(current_folder_cluster(), browser.seen_mutations))
+            scan_page(0);
+        else
+            browser.seen_mutations = fat16_mutations();
+    }
     if (!browser.loading)
         return 0;
 
@@ -133,34 +139,23 @@ static int has_extension(const char *name, const char *extension)
     return !*name && !*extension;
 }
 
-static void open_selected(void)
+static int path_add(struct browser_path *path, const struct fat16_file *file)
 {
-    if (browser.loading || browser.selected >= browser.count)
-        return;
-    const struct fat16_file *file = &browser.files[browser.selected];
-    browser.notice = 0;
-    if (file->is_directory) {
-        if (browser.here.depth == PATH_DEPTH) {
-            browser.notice = "Limite de 16 niveis na navegacao";
-            return;
-        }
-        if (!file->first_cluster) {
-            browser.notice = "Pasta invalida";
-            return;
-        }
-        for (unsigned int i = 0; i < browser.here.depth; ++i) {
-            if (browser.here.folders[i].cluster == file->first_cluster) {
-                browser.notice = "Pasta invalida";
-                return;
-            }
-        }
-        struct browser_path path = browser.here;
-        struct folder *folder = &path.folders[path.depth++];
-        folder->cluster = file->first_cluster;
-        for (unsigned int i = 0; i < sizeof(folder->name); ++i)
-            folder->name[i] = file->name[i];
-        navigate(&path);
-    } else if (has_extension(file->name, ".APP")) {
+    if (!file->first_cluster || path->depth == PATH_DEPTH)
+        return 0;
+    for (unsigned int i = 0; i < path->depth; ++i)
+        if (path->folders[i].cluster == file->first_cluster)
+            return 0;
+    struct folder *folder = &path->folders[path->depth++];
+    folder->cluster = file->first_cluster;
+    for (unsigned int i = 0; i < sizeof(folder->name); ++i)
+        folder->name[i] = file->name[i];
+    return 1;
+}
+
+static const char *open_file(const struct fat16_file *file, unsigned int directory)
+{
+    if (has_extension(file->name, ".APP")) {
         unsigned int length = 0;
         while (file->name[length])
             ++length;
@@ -168,14 +163,101 @@ static void open_selected(void)
             .args = (const unsigned char *)file->name, .args_size = length + 1, .argc = 1
         };
         const enum app_status status = desktop_open_app(&browser.volume, file, &launch);
-        if (status != APP_STARTED)
-            browser.notice = status == APP_LIMIT ? "Feche uma janela de APP" :
-                status == APP_INVALID ? "Formato APP invalido" : "Falha ao abrir o APP";
-    } else if (has_extension(file->name, ".TXT") || has_extension(file->name, ".ASM")) {
-        browser.notice = shell_edit_file(&browser.volume, current_folder_cluster(),
+        if (status == APP_STARTED)
+            return 0;
+        return status == APP_LIMIT ? "Feche uma janela de APP" :
+            status == APP_INVALID ? "Formato APP invalido" : "Falha ao abrir o APP";
+    }
+    if (has_extension(file->name, ".TXT") || has_extension(file->name, ".ASM"))
+        return shell_edit_file(&browser.volume, directory,
             (const unsigned char *)file->name, file);
+    return "Abra arquivos TXT, ASM ou APP";
+}
+
+static void open_selected(void)
+{
+    if (browser.loading || browser.selected >= browser.count)
+        return;
+    const struct fat16_file *file = &browser.files[browser.selected];
+    browser.notice = 0;
+    if (file->is_directory) {
+        struct browser_path path = browser.here;
+        if (path_add(&path, file))
+            navigate(&path);
+        else
+            browser.notice = "Pasta invalida ou muito profunda";
     } else {
-        browser.notice = "Abra arquivos TXT, ASM ou APP";
+        browser.notice = open_file(file, current_folder_cluster());
+    }
+}
+
+int browser_open_target(const char *target)
+{
+    if (!browser.mounted) {
+        browser.notice = "Volume FAT16 indisponivel";
+        return 1;
+    }
+    struct browser_path path = {0};
+    unsigned int directory = 0;
+    for (const char *p = target; *p == '/'; ) {
+        unsigned char name[13];
+        unsigned int size = 0;
+        ++p;
+        while (*p && *p != '/' && size + 1 < sizeof(name))
+            name[size++] = *p++;
+        name[size] = 0;
+        struct fat16_file file;
+        if (!size || (*p && *p != '/') ||
+            fat16_find_at(&browser.volume, directory, name, &file) != 1)
+            break;
+        if (!file.is_directory) {
+            if (*p)
+                break;
+            browser.notice = open_file(&file, directory);
+            return browser.notice != 0;
+        }
+        if (!path_add(&path, &file))
+            break;
+        if (!*p) {
+            navigate(&path);
+            return 1;
+        }
+        directory = file.first_cluster;
+    }
+    browser.notice = "Destino do atalho nao encontrado";
+    return 1;
+}
+
+static void create_shortcut(void)
+{
+    const struct fat16_file *file = &browser.files[browser.selected];
+    _Static_assert(SHORTCUT_PATH_LIMIT >= 13 * (PATH_DEPTH + 1) + 1, "Shortcut path capacity");
+    char path[SHORTCUT_PATH_LIMIT];
+    unsigned int used = 0;
+    for (unsigned int i = 0; i <= browser.here.depth; ++i) {
+        const char *name = i == browser.here.depth ? file->name : browser.here.folders[i].name;
+        path[used++] = '/';
+        for (; *name; ++name)
+            path[used++] = *name;
+    }
+    path[used] = 0;
+    const enum shortcut_kind kind = file->is_directory ? SHORTCUT_FOLDER :
+        has_extension(file->name, ".APP") ? SHORTCUT_APP : SHORTCUT_FILE;
+    unsigned int index;
+    const enum shortcut_result result = shortcuts_add(path, kind, &index);
+    switch (result) {
+    case SHORTCUT_SAVED:
+    case SHORTCUT_SESSION:
+        desktop_shortcut_added(index);
+        browser.notice = result == SHORTCUT_SAVED ? "Atalho criado no desktop" :
+            "Atalho criado nesta sessao";
+        break;
+    case SHORTCUT_EXISTS:
+        browser.notice = "O atalho ja existe";
+        break;
+    case SHORTCUT_FULL:
+        browser.notice = "Sem espaco ou nome invalido";
+        break;
     }
 }
 
@@ -218,6 +300,17 @@ static int begin_name(void)
 
 int browser_key(unsigned int key)
 {
+    if (browser.context_open) {
+        if (key == '\n') {
+            browser.context_open = 0;
+            create_shortcut();
+        } else if (key == KEY_ESCAPE) {
+            browser.context_open = 0;
+        } else {
+            return 0;
+        }
+        return 1;
+    }
     if (browser.naming) {
         if (key == '\n')
             return create_folder();
@@ -259,8 +352,31 @@ int browser_key(unsigned int key)
     return 1;
 }
 
+int browser_context(unsigned int x, unsigned int y)
+{
+    if (browser.loading || browser.naming)
+        return 0;
+    if (!tool_hit(x, y, 14, TABLE_TOP, BROWSER_WIDTH - 28, browser.count * FILE_ROW_HEIGHT)) {
+        const int closed = browser.context_open;
+        browser.context_open = 0;
+        return closed;
+    }
+    browser.selected = (y - TABLE_TOP) / FILE_ROW_HEIGHT;
+    browser.previous_click = NO_SELECTION;
+    browser.context_x = x + CONTEXT_WIDTH + 8 < BROWSER_WIDTH ? x : BROWSER_WIDTH - CONTEXT_WIDTH - 8;
+    browser.context_y = y + CONTEXT_HEIGHT + 8 < BROWSER_HEIGHT ? y : BROWSER_HEIGHT - CONTEXT_HEIGHT - 8;
+    browser.context_open = 1;
+    return 1;
+}
+
 int browser_click(unsigned int x, unsigned int y)
 {
+    if (browser.context_open) {
+        browser.context_open = 0;
+        if (tool_hit(x, y, browser.context_x, browser.context_y, CONTEXT_WIDTH, CONTEXT_HEIGHT))
+            create_shortcut();
+        return 1;
+    }
     if (browser.naming) {
         if (tool_hit(x, y, 500, 448, 92, 33))
             return create_folder();
@@ -336,7 +452,7 @@ static void draw_row(unsigned int x, unsigned int y, unsigned int index)
         tool_number(x + 513, y + 7, file->size, TOOL_MUTED);
 }
 
-void browser_draw(unsigned int x, unsigned int y)
+void browser_draw(unsigned int x, unsigned int y, unsigned int clip_y, unsigned int clip_height)
 {
     vga_graphics_fill(x, y, BROWSER_WIDTH, BROWSER_HEIGHT, TOOL_BG);
     vga_graphics_fill(x, y, BROWSER_WIDTH, 55, TOOL_PANEL);
@@ -371,8 +487,11 @@ void browser_draw(unsigned int x, unsigned int y)
     else if (!browser.count && browser.mounted)
         tool_label(x + 60, y + TABLE_TOP + 24, "Nenhum item nesta pagina", TOOL_MUTED);
     else
-        for (unsigned int i = 0; i < browser.count; ++i)
-            draw_row(x + 14, y + TABLE_TOP + i * FILE_ROW_HEIGHT, i);
+        for (unsigned int i = 0; i < browser.count; ++i) {
+            const unsigned int top = y + TABLE_TOP + i * FILE_ROW_HEIGHT;
+            if (top < clip_y + clip_height && top + FILE_ROW_HEIGHT > clip_y)
+                draw_row(x + 14, top, i);
+        }
 
     vga_graphics_fill(x, y + 446, BROWSER_WIDTH, 52, TOOL_PANEL);
     if (browser.naming) {
@@ -389,6 +508,13 @@ void browser_draw(unsigned int x, unsigned int y)
         const char *notice = browser.notice ? browser.notice : "Duplo clique ou Enter para abrir";
         for (unsigned int i = 0; i < 35 && notice[i]; ++i)
             vga_graphics_overlay_glyph(x + 150 + i * TOOL_CELL, y + 458, notice[i], TOOL_MUTED);
+    }
+    if (browser.context_open) {
+        const unsigned int left = x + browser.context_x, top = y + browser.context_y;
+        vga_graphics_fill(left + 3, top + 4, CONTEXT_WIDTH, CONTEXT_HEIGHT, 0x080e19);
+        vga_graphics_fill(left, top, CONTEXT_WIDTH, CONTEXT_HEIGHT, TOOL_BORDER);
+        vga_graphics_fill(left + 1, top + 1, CONTEXT_WIDTH - 2, CONTEXT_HEIGHT - 2, TOOL_HILITE);
+        tool_label(left + 14, top + 10, "Criar atalho", TOOL_TEXT);
     }
 }
 

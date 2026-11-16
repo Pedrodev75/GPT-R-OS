@@ -1,4 +1,5 @@
 #include "app_window.h"
+#include "app_canvas.h"
 
 #ifdef GPT_R_GRAPHICS
 #include "../drivers/keyboard.h"
@@ -50,6 +51,7 @@ static void put(struct app_console *console, unsigned char glyph)
 void app_window_reset(unsigned int slot)
 {
     consoles[slot] = (struct app_console){0};
+    app_canvas_reset(slot);
 }
 
 void *app_window_context(unsigned int slot)
@@ -149,6 +151,10 @@ void app_window_update(unsigned int slot)
     struct app_result result;
     if (!app_take_result(slot, &result))
         return;
+    if (app_canvas_visible(slot)) {
+        app_canvas_reset(slot);
+        console->dirty = (1u << APP_WINDOW_ROWS) - 1;
+    }
     end_utf8(console);
     if (console->col)
         next_row(console);
@@ -211,7 +217,7 @@ unsigned int app_window_dirty(unsigned int slot)
     struct app_console *console = &consoles[slot];
     const unsigned int mask = console->dirty;
     console->dirty = 0;
-    return mask;
+    return app_canvas_visible(slot) ? app_canvas_dirty(slot) : mask;
 }
 
 void app_window_focus(unsigned int slot)
@@ -223,6 +229,10 @@ void app_window_focus(unsigned int slot)
 void app_window_draw(unsigned int slot, unsigned int x, unsigned int y, int focused,
     unsigned int clip_y, unsigned int clip_height)
 {
+    if (app_canvas_visible(slot)) {
+        app_canvas_draw(slot, x, y, clip_y, clip_height);
+        return;
+    }
     struct app_console *console = &consoles[slot];
     vga_graphics_fill(x, y, APP_WINDOW_WIDTH, APP_WINDOW_HEIGHT, 0x0a1422);
     const unsigned int first = clip_y > y ? (clip_y - y) / VGA_LINE_HEIGHT : 0;

@@ -1,4 +1,5 @@
 #include "app.h"
+#include "../desktop/app_canvas.h"
 #include "../memory/pages.h"
 #include "../drivers/keyboard.h"
 
@@ -40,7 +41,7 @@ static unsigned long long directory[512] __attribute__((aligned(PAGE_SIZE)));
 static unsigned long long table[512] __attribute__((aligned(PAGE_SIZE)));
 static unsigned long long stack_page_flags;
 
-enum process_state { UNUSED, READY, WAITING, FINISHED };
+enum process_state { UNUSED, READY, WAITING, WAITING_CLICK, FINISHED };
 
 struct process {
     struct app_frame frame;
@@ -268,7 +269,7 @@ struct app_task_info app_task_info(unsigned int slot)
 {
     const struct process *process = &processes[slot];
     const enum app_task_state state = process->state == READY ? APP_TASK_RUNNING :
-        process->state == WAITING ? APP_TASK_WAITING : APP_TASK_FINISHED;
+        (process->state == WAITING || process->state == WAITING_CLICK) ? APP_TASK_WAITING : APP_TASK_FINISHED;
     return (struct app_task_info){ .pid = process->pid, .state = state };
 }
 
@@ -360,6 +361,57 @@ void app_preempt(const struct app_frame *frame)
     }
 }
 
+#ifdef GPT_R_GRAPHICS
+static void app_gui_syscall(struct app_frame *frame, unsigned long long number)
+{
+    const unsigned int slot = running - processes;
+    switch (number) {
+    case APP_GUI_BEGIN:
+        frame->rax = app_canvas_begin(slot, frame->rdi);
+        break;
+    case APP_GUI_RECT:
+        frame->rax = app_canvas_rect(slot, frame->rdi, frame->rsi, frame->rdx, frame->rcx, frame->r8);
+        break;
+    case APP_GUI_TEXT: {
+        const unsigned long long address = frame->rdx, size = frame->rcx;
+        if (contains(address, size, USER_STACK, PAGE_SIZE) ||
+            contains(address, size, USER_IMAGE, running->image_size))
+            frame->rax = app_canvas_text(slot, frame->rdi, frame->rsi,
+                (const unsigned char *)address, size, frame->r8);
+        break;
+    }
+    case APP_GUI_PRESENT:
+        frame->rax = app_canvas_present(slot);
+        break;
+    case APP_GUI_WAIT:
+        if (app_canvas_visible(slot)) {
+            const unsigned long long click = app_canvas_poll(slot);
+            if (click) {
+                frame->rax = click;
+                break;
+            }
+            running->frame = *frame;
+            running->state = WAITING_CLICK;
+            app_leave();
+        }
+        break;
+    }
+}
+
+void app_deliver_click(unsigned int slot, unsigned int x, unsigned int y)
+{
+    struct process *process = &processes[slot];
+    app_canvas_click(slot, x, y);
+    if (process->state == WAITING_CLICK) {
+        const unsigned long long click = app_canvas_poll(slot);
+        if (click) {
+            process->frame.rax = click;
+            process->state = READY;
+        }
+    }
+}
+#endif
+
 void app_syscall(struct app_frame *frame)
 {
     const unsigned long long number = frame->rax;
@@ -370,8 +422,12 @@ void app_syscall(struct app_frame *frame)
         return;
     if (number == 2)
         finish((struct app_result){ .status = APP_EXITED, .exit_code = argument });
-    if (number != 1 && number != 3)
+    if (number != 1 && number != 3) {
+#ifdef GPT_R_GRAPHICS
+        app_gui_syscall(frame, number);
+#endif
         return;
+    }
     if (!length) {
         frame->rax = 0;
         return;
@@ -416,7 +472,7 @@ void app_complete_read(unsigned int slot, const unsigned char *bytes, unsigned i
 void app_cancel(unsigned int slot)
 {
     struct process *process = &processes[slot];
-    if (process->state == READY || process->state == WAITING) {
+    if (process->state == READY || process->state == WAITING || process->state == WAITING_CLICK) {
         process->result = (struct app_result){ .status = APP_INTERRUPTED };
         process->state = FINISHED;
         release_pages(process);

@@ -1,5 +1,6 @@
 #include "desktop.h"
 #include "app_window.h"
+#include "shortcuts.h"
 #include "file_browser.h"
 #include "task_manager.h"
 #include "../drivers/timer.h"
@@ -15,7 +16,8 @@ enum {
     MENU_X = 14, MENU_WIDTH = 300, MENU_HEIGHT = 256, MENU_Y = BAR_Y - MENU_HEIGHT - 8,
     WORKSPACE = 0x101c30, PANEL = 0x142338, ACTIVE = 0x1c3850, BORDER = 0x364e6a,
     SHADOW = 0x080e19, INK = 0xe7eef8, MUTED = 0x91a8c1, ACCENT = 0x61dcf5,
-    APP_TAB_X = 731, APP_TAB_STEP = 71, APP_TAB_WIDTH = 68
+    APP_TAB_X = 731, APP_TAB_STEP = 71, APP_TAB_WIDTH = 68,
+    NO_SHORTCUT = SHORTCUT_COUNT, SHORTCUT_DBL_TICKS = 35, SHORTCUT_TOP = 52
 };
 
 enum window_id {
@@ -56,6 +58,8 @@ static enum window_id focus, menu_choice, dragging;
 static int menu_open;
 static unsigned int pointer_x, pointer_y, drag_dx, drag_dy, buttons;
 static const unsigned char *editor_name;
+static unsigned int selected_shortcut, pressed_shortcut, previous_shortcut, shortcut_tick;
+static int moving_shortcut;
 static enum window_id painted_focus;
 static unsigned int painted_visible, painted_open;
 static int painted_menu;
@@ -119,6 +123,7 @@ static void desktop_background(void)
     }
     logo(23, 16);
     text(55, 15, "GPT-R OS", INK);
+    shortcuts_draw(selected_shortcut);
 }
 
 static void draw_window(enum window_id id, int focused, const unsigned char *name)
@@ -244,7 +249,7 @@ static void paint_app(enum window_id id, struct region damage)
     } else if (id == EDITOR) {
         shell_editor_draw(x, y, 1);
     } else if (id == EXPLORER) {
-        browser_draw(x, y);
+        browser_draw(x, y, damage.y, damage.height);
     } else if (id == TASKS) {
         tasks_draw(x, y);
     } else {
@@ -256,8 +261,25 @@ static void paint_app(enum window_id id, struct region damage)
 static void compose_region(struct region damage)
 {
     vga_graphics_clip(damage.x, damage.y, damage.width, damage.height);
-    desktop_background();
-    for (unsigned int i = 0; i < NO_WINDOW; ++i)
+    /* A fully covered region can start at the last opaque window beneath it. */
+    unsigned int first = 0;
+    int covered = 0;
+    for (unsigned int i = NO_WINDOW; i; --i) {
+        const enum window_id id = window_order[i - 1];
+        if (!visible(id))
+            continue;
+        const struct window *w = &windows[id];
+        if (damage.x >= w->x && damage.y >= w->y &&
+            damage.x + damage.width <= w->x + full_width(w) &&
+            damage.y + damage.height <= w->y + full_height(w)) {
+            first = i - 1;
+            covered = 1;
+            break;
+        }
+    }
+    if (!covered)
+        desktop_background();
+    for (unsigned int i = first; i < NO_WINDOW; ++i)
         paint_app(window_order[i], damage);
     if (intersects(damage, (struct region){0, BAR_Y, SCREEN_WIDTH, BAR_HEIGHT}))
         draw_taskbar();
@@ -372,16 +394,22 @@ static void repaint_app_output(int immediate)
         if (!mask || !ready_to_paint)
             continue;
         pending_app_paint[slot] = 0;
-        const unsigned int first = __builtin_ctz(mask);
-        const unsigned int last = sizeof(mask) * 8 - 1 - __builtin_clz(mask);
         if (!repainting) {
             begin_scene();
             repainting = 1;
         }
         const struct window *w = &windows[id];
-        compose_region((struct region){w->x + DESKTOP_FRAME,
-            w->y + DESKTOP_TITLE_HEIGHT + first * VGA_LINE_HEIGHT,
-            w->width, (last + 1 - first) * VGA_LINE_HEIGHT});
+        unsigned int bands = mask;
+        while (bands) {
+            const unsigned int first = __builtin_ctz(bands);
+            unsigned int end = first + 1;
+            while (bands & (1u << end))
+                ++end;
+            compose_region((struct region){w->x + DESKTOP_FRAME,
+                w->y + DESKTOP_TITLE_HEIGHT + first * VGA_LINE_HEIGHT,
+                w->width, (end - first) * VGA_LINE_HEIGHT});
+            bands &= ~((1u << end) - 1);
+        }
     }
     if (repainting) {
         present_scene();
@@ -464,15 +492,19 @@ void desktop_init(void)
     buttons = menu_open = 0;
     pointer_x = SCREEN_WIDTH / 2;
     pointer_y = SCREEN_HEIGHT / 2;
+    selected_shortcut = pressed_shortcut = previous_shortcut = NO_SHORTCUT;
+    moving_shortcut = 0;
+    shortcuts_init();
     desktop_repaint();
 }
 
 static void cancel_drag(void)
 {
-    if (dragging != NO_WINDOW) {
+    if (dragging != NO_WINDOW || moving_shortcut)
         vga_graphics_drag_outline(0, 0, 0, 0);
-        dragging = NO_WINDOW;
-    }
+    dragging = NO_WINDOW;
+    pressed_shortcut = NO_SHORTCUT;
+    moving_shortcut = 0;
 }
 
 static void raise_window(enum window_id id)
@@ -626,6 +658,131 @@ static int hit_window(enum window_id id)
     return hit(pointer_x, pointer_y, w->x, w->y, full_width(w), full_height(w));
 }
 
+static enum window_id pointed_window(void)
+{
+    for (unsigned int i = NO_WINDOW; i; --i)
+        if (hit_window(window_order[i - 1]))
+            return window_order[i - 1];
+    return NO_WINDOW;
+}
+
+static void repaint_shortcut(unsigned int index)
+{
+    const struct desktop_shortcut *item = shortcuts_at(index);
+    if (item)
+        compose_region((struct region){item->x, item->y, SHORTCUT_WIDTH, SHORTCUT_HEIGHT});
+}
+
+static void select_shortcut(unsigned int index)
+{
+    if (selected_shortcut == index)
+        return;
+    const unsigned int old = selected_shortcut;
+    selected_shortcut = index;
+    begin_scene();
+    repaint_shortcut(old);
+    repaint_shortcut(index);
+    present_scene();
+}
+
+void desktop_shortcut_added(unsigned int index)
+{
+    select_shortcut(index);
+}
+
+static void open_shortcut(unsigned int index)
+{
+    const struct desktop_shortcut *item = shortcuts_at(index);
+    if (!windows[EXPLORER].open)
+        browser_init();
+    if (browser_open_target(item->target)) {
+        focus_window(EXPLORER);
+        repaint_client(EXPLORER);
+    }
+}
+
+static void press_shortcut(int index)
+{
+    if (index < 0) {
+        select_shortcut(NO_SHORTCUT);
+        previous_shortcut = NO_SHORTCUT;
+        return;
+    }
+    const struct desktop_shortcut *item = shortcuts_at(index);
+    pressed_shortcut = index;
+    drag_dx = pointer_x - item->x;
+    drag_dy = pointer_y - item->y;
+    select_shortcut(index);
+}
+
+static void handle_shortcut_drag(int released)
+{
+    const unsigned int index = pressed_shortcut;
+    const struct desktop_shortcut *item = shortcuts_at(index);
+    const unsigned int old_x = item->x, old_y = item->y;
+    int delta_x = (int)pointer_x - (int)(old_x + drag_dx);
+    int delta_y = (int)pointer_y - (int)(old_y + drag_dy);
+    if (delta_x < -4 || delta_x > 4 || delta_y < -4 || delta_y > 4)
+        moving_shortcut = 1;
+    const unsigned int left = pointer_x > drag_dx ? pointer_x - drag_dx : 0;
+    const unsigned int top = pointer_y > drag_dy + SHORTCUT_TOP ?
+        pointer_y - drag_dy : SHORTCUT_TOP;
+    const unsigned int max_x = SCREEN_WIDTH - SHORTCUT_WIDTH;
+    const unsigned int max_y = BAR_Y - SHORTCUT_HEIGHT;
+    const unsigned int x = left < max_x ? left : max_x;
+    const unsigned int y = top < max_y ? top : max_y;
+    if (!released) {
+        if (moving_shortcut)
+            vga_graphics_drag_outline(x, y, SHORTCUT_WIDTH, SHORTCUT_HEIGHT);
+        return;
+    }
+
+    const int moved = moving_shortcut;
+    cancel_drag();
+    if (moved) {
+        previous_shortcut = NO_SHORTCUT;
+        if (shortcuts_move(index, x, y)) {
+            begin_scene();
+            compose_region((struct region){old_x, old_y, SHORTCUT_WIDTH, SHORTCUT_HEIGHT});
+            repaint_shortcut(index);
+            present_scene();
+        }
+    } else if (shortcuts_pick(pointer_x, pointer_y) == (int)index) {
+        const unsigned int tick = timer_ticks();
+        if (previous_shortcut == index && tick - shortcut_tick <= SHORTCUT_DBL_TICKS) {
+            previous_shortcut = NO_SHORTCUT;
+            open_shortcut(index);
+        } else {
+            previous_shortcut = index;
+            shortcut_tick = tick;
+        }
+    }
+}
+
+static int client_coordinates(enum window_id id, unsigned int *x, unsigned int *y)
+{
+    const struct window *w = &windows[id];
+    const unsigned int left = w->x + DESKTOP_FRAME, top = w->y + DESKTOP_TITLE_HEIGHT;
+    if (!hit(pointer_x, pointer_y, left, top, w->width, w->height))
+        return 0;
+    *x = pointer_x - left;
+    *y = pointer_y - top;
+    return 1;
+}
+
+static void right_click(void)
+{
+    if (menu_open || pointed_window() != EXPLORER)
+        return;
+    unsigned int x, y;
+    if (client_coordinates(EXPLORER, &x, &y)) {
+        if (focus != EXPLORER)
+            focus_window(EXPLORER);
+        if (browser_context(x, y))
+            repaint_client(EXPLORER);
+    }
+}
+
 static void click(unsigned int *row)
 {
     const unsigned int x = pointer_x, y = pointer_y;
@@ -654,27 +811,25 @@ static void click(unsigned int *row)
         }
     }
 
-    enum window_id id = NO_WINDOW;
-    for (unsigned int i = NO_WINDOW; i; --i) {
-        if (hit_window(window_order[i - 1])) {
-            id = window_order[i - 1];
-            break;
-        }
-    }
-    if (id == NO_WINDOW)
+    const enum window_id id = pointed_window();
+    if (id == NO_WINDOW) {
+        press_shortcut(shortcuts_pick(x, y));
         return;
+    }
+    previous_shortcut = NO_SHORTCUT;
     struct window *w = &windows[id];
     if (focus != id)
         focus_window(id);
     if (y - w->y >= DESKTOP_TITLE_HEIGHT) {
-        if (x - w->x < DESKTOP_FRAME || x - w->x >= DESKTOP_FRAME + w->width ||
-            y - w->y >= DESKTOP_TITLE_HEIGHT + w->height)
+        unsigned int local_x, local_y;
+        if (!client_coordinates(id, &local_x, &local_y))
             return;
-        const unsigned int local_x = x - w->x - DESKTOP_FRAME;
-        const unsigned int local_y = y - w->y - DESKTOP_TITLE_HEIGHT;
         if ((id == EXPLORER && browser_click(local_x, local_y)) ||
-            (id == TASKS && tasks_click(local_x, local_y)))
+            (id == TASKS && tasks_click(local_x, local_y))) {
             repaint_client(id);
+        } else if (id >= FIRST_APP) {
+            app_deliver_click(id - FIRST_APP, local_x, local_y);
+        }
         return;
     }
     const unsigned int right = w->x + full_width(w);
@@ -731,9 +886,16 @@ static void mouse_event(const struct mouse_event *event, unsigned int *row)
             click(row);
         else if (dragging != NO_WINDOW)
             drag_window(0);
+        else if (pressed_shortcut != NO_SHORTCUT)
+            handle_shortcut_drag(0);
     } else if (dragging != NO_WINDOW) {
         drag_window(1);
+    } else if (pressed_shortcut != NO_SHORTCUT) {
+        handle_shortcut_drag(1);
     }
+    if ((event->buttons & MOUSE_RIGHT) && !(buttons & MOUSE_RIGHT) &&
+        !(event->buttons & MOUSE_LEFT))
+        right_click();
     buttons = event->buttons;
 }
 

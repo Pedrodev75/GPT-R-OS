@@ -33,6 +33,8 @@ int fat16_next_at(const struct fat16_volume *volume, struct fat16_dir *dir,
     struct fat16_file *file);
 int fat16_lookup_at(const struct fat16_volume *volume, unsigned int directory,
     const unsigned char *name, struct fat16_file *file);
+int fat16_find_at(const struct fat16_volume *volume, unsigned int directory,
+    const unsigned char *name, struct fat16_file *file);
 enum fat16_scan_result {
     FAT16_SCAN_ERROR = -1, FAT16_SCAN_END, FAT16_SCAN_ENTRY, FAT16_SCAN_SKIP
 };
@@ -61,6 +63,7 @@ enum fat16_edit_result fat16_write_at(const struct fat16_volume *volume,
 enum fat16_edit_result fat16_mkdir(const struct fat16_volume *volume,
     unsigned int directory, const unsigned char *name, unsigned int name_size);
 unsigned int fat16_mutations(void);
+int fat16_dir_changed(unsigned int directory, unsigned int since);
 enum fat16_edit_result fat16_remove(const struct fat16_volume* volume,
     const unsigned char* name, unsigned int name_size);
 

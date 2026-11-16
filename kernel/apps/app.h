@@ -50,6 +50,9 @@ void app_schedule(void);
 unsigned int app_read_capacity(unsigned int slot);
 void app_complete_read(unsigned int slot, const unsigned char *bytes, unsigned int count);
 void app_cancel(unsigned int slot);
+#ifdef GPT_R_GRAPHICS
+void app_deliver_click(unsigned int slot, unsigned int x, unsigned int y);
+#endif
 int app_take_result(unsigned int slot, struct app_result *result);
 void app_release(unsigned int slot);
 struct app_result app_run(const struct fat16_volume *volume,

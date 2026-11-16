@@ -1,6 +1,6 @@
 # Executáveis .APP do GPT-R OS
 
-A versão 1 do formato guarda uma imagem plana de código e dados constantes x86-64. O programa deve usar endereçamento relativo à posição e manter dados mutáveis na pilha. O comando `run <arquivo.APP> [argumentos]` carrega e executa essa imagem em ring 3. O shell executa um programa por vez.
+A versão 1 do formato guarda uma imagem plana de código e dados constantes x86-64. O programa deve usar endereçamento relativo à posição e manter dados mutáveis na pilha. O comando `run <arquivo.APP> [argumentos]` carrega e executa essa imagem em ring 3. No desktop, cada execução abre uma janela própria e o escalonador pode manter até quatro janelas de programas abertas.
 
 ## Cabeçalho
 
@@ -24,7 +24,7 @@ Na entrada, `RSP` está alinhado a 16 bytes e aponta para `argc` (64 bits). O ve
 | RAX | Chamada | Argumentos e retorno |
 |---|---|---|
 | 1 | `write` | RDI aponta para o texto UTF-8, RSI informa o comprimento em bytes. RAX retorna o número de bytes consumidos ou um erro negativo. O kernel verifica toda a faixa indicada. |
-| 2 | `exit` | RDI contém o código de saída. O kernel encerra o programa e volta ao shell. |
+| 2 | `exit` | RDI contém o código de saída. O kernel encerra o programa, libera suas páginas e mostra o código de saída na janela. |
 | 3 | `read` | RDI aponta para um buffer gravável na pilha e RSI indica a capacidade incluindo o NUL. Lê uma linha UTF-8 até Enter e retorna os bytes escritos, sem contar o NUL. |
 
 Na chamada `read`, Backspace apaga o último caractere inteiro. A digitação ocupa uma linha e caracteres adicionais são ignorados quando o buffer ou a linha fica cheia. Capacidade zero retorna zero imediatamente. Um buffer fora da pilha retorna `-1`.
@@ -39,9 +39,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Pack-App.ps1 -Messag
 
 O script já contém o código equivalente ao exemplo em `apps/OLA.S`. Sem `-Message`, gera a mensagem `Ola, GPT-R OS!`. Para empacotar outro código x86-64 que você já montou como binário plano, passe `-InputPath programa.bin` e, se necessário, `-EntryOffset`.
 
-O shell compara o nome exatamente como aparece no `ls`. A imagem de teste contém `ola.APP` e `ola.asm`. Rode `run ola.APP` para ver a mensagem de exemplo e o código de saída 0. Os outros exemplos estão em `apps/` para quem quiser montá-los. Durante um programa ativo, **Ctrl+C** devolve o controle ao shell.
+O shell compara o nome exatamente como aparece no `ls`. A imagem de teste contém `ola.APP` e `ola.asm`. Rode `run ola.APP` para ver a mensagem de exemplo e o código de saída 0. Os outros exemplos estão em `apps/` para quem quiser montá-los. Pressione **Ctrl+C** na janela do programa para interrompê-lo.
 
-O código e as constantes ficam em uma página de leitura e execução. A pilha tem 4 KiB com uma página de guarda abaixo dela. A pilha tem execução desabilitada quando a CPU oferece NX. Ao encerrar ou interromper o programa com **Ctrl+C**, o kernel libera as duas páginas e volta ao shell.
+O código e as constantes ficam em uma página de leitura e execução. A pilha tem 4 KiB com uma página de guarda abaixo dela. A pilha tem execução desabilitada quando a CPU oferece NX. Ao encerrar ou interromper o programa com **Ctrl+C**, o kernel libera as duas páginas e mantém a saída visível na janela.
 
 ## Montar um .APP dentro do GPT-R OS
 
@@ -54,7 +54,7 @@ appinfo feito.APP
 run feito.APP
 ```
 
-No editor, use **Ctrl+S** para salvar e **Esc** para voltar ao shell. Se houver alterações pendentes, o editor oferece salvar, descartar ou continuar editando. Ele abre arquivos UTF-8 de até 4 KiB e salva as quebras de linha em LF.
+No editor, use **Ctrl+S** para salvar e **Esc** para fechar o editor. Se houver alterações pendentes, o editor oferece salvar, descartar ou continuar editando. Ele abre arquivos UTF-8 de até 4 KiB e salva as quebras de linha em LF.
 
 Com o fonte de exemplo, o programa imprime `Ola do GPT-R OS!` e sai com código 0. Para conservar o arquivo montado após fechar o QEMU, use uma cópia do HD com gravação persistente.
 
@@ -111,7 +111,7 @@ Salve, saia do editor e rode `asm eco.asm eco.APP` seguido de `run eco.APP`. Dig
 
 ### Testar exceções em modo usuário
 
-Monte um programa separado para cada teste. O shell mostra o vetor e retoma o prompt quando o programa sofre a exceção.
+Monte um programa separado para cada teste. A janela do programa mostra o vetor da exceção e o endereço da instrução.
 
 | Fonte do teste | Exceção esperada |
 |---|---|
@@ -120,3 +120,37 @@ Monte um programa separado para cada teste. O shell mostra o vetor e retoma o pr
 | `ud2` | Instrução inválida, vetor 6 (`#UD`). |
 | `hlt` | Instrução privilegiada em ring 3, vetor 13 (`#GP`). |
 | `xor edi, edi` e depois `mov eax, [rdi]` | Acesso a endereço inacessível para o programa, vetor 14 (`#PF`). |
+
+## Interface gráfica
+
+Um `.APP` pode apresentar desenhos na área de 448×264 pixels da sua janela. A
+origem `(0, 0)` fica no canto superior esquerdo do conteúdo. As coordenadas
+continuam relativas à janela quando ela se move.
+
+As chamadas gráficas usam `int 0x80` e preservam os registradores, salvo `RAX`.
+Use cores RGB de 24 bits no formato `0xRRGGBB`.
+
+| RAX | Operação | Argumentos |
+|---|---|---|
+| 4 | Começar um quadro | `RDI` cor de fundo |
+| 5 | Desenhar um retângulo preenchido | `RDI` x, `RSI` y, `RDX` largura, `RCX` altura, `R8` cor |
+| 6 | Desenhar texto ASCII | `RDI` x, `RSI` y, `RDX` ponteiro, `RCX` número de bytes, `R8` cor |
+| 7 | Apresentar o quadro | Sem argumentos |
+| 8 | Esperar clique esquerdo | Sem argumentos |
+
+As chamadas 4 a 7 retornam 0 quando bem-sucedidas ou −1 quando o pedido é
+inválido. Desenhe todos os elementos entre 4 e 7. O quadro anterior continua
+visível enquanto o novo é montado. O limite é de 96 elementos e 512 bytes de
+texto por quadro. Cada caractere mede 16×20 pixels. Retângulos e textos devem
+caber inteiros na área de desenho. Caracteres fora do ASCII imprimível aparecem
+como `?`.
+
+Depois de apresentar um quadro, chame 8 para esperar um clique. O programa
+fica bloqueado enquanto não houver evento e o kernel pode executar outros
+programas. O evento tem x nos bits 0–15, y nos bits 16–31 e o bit 32 ligado.
+O retorno é −1 antes do primeiro quadro. A janela recebe cliques na área de
+desenho enquanto está em foco. O sistema conserva até sete cliques pendentes.
+
+O fonte [CALC.S](../apps/CALC.S) mostra como implementar botões, ler as
+coordenadas de um clique e redesenhar um visor. Na imagem, abra
+`APPS/CALC.APP` pelo Explorador.

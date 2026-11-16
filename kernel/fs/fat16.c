@@ -176,12 +176,14 @@ int fat16_next(const struct fat16_volume *volume, struct fat16_dir *dir,
     return result;
 }
 
-int fat16_lookup_at(const struct fat16_volume *volume, unsigned int directory,
-    const unsigned char *name, struct fat16_file *file)
+static int lookup_at(const struct fat16_volume *volume, unsigned int directory,
+    const unsigned char *name, struct fat16_file *file, int include_directories)
 {
     struct fat16_dir dir = { .first_cluster = directory };
     int result;
-    while ((result = fat16_next(volume, &dir, file)) > 0) {
+    while ((result = fat16_next_at(volume, &dir, file)) > 0) {
+        if (file->is_directory && !include_directories)
+            continue;
         unsigned int i = 0;
         while (name[i] && name[i] == (unsigned char)file->name[i])
             ++i;
@@ -189,6 +191,18 @@ int fat16_lookup_at(const struct fat16_volume *volume, unsigned int directory,
             break;
     }
     return result;
+}
+
+int fat16_lookup_at(const struct fat16_volume *volume, unsigned int directory,
+    const unsigned char *name, struct fat16_file *file)
+{
+    return lookup_at(volume, directory, name, file, 0);
+}
+
+int fat16_find_at(const struct fat16_volume *volume, unsigned int directory,
+    const unsigned char *name, struct fat16_file *file)
+{
+    return lookup_at(volume, directory, name, file, 1);
 }
 
 int fat16_space(const struct fat16_volume *volume, unsigned int *total,
@@ -215,7 +229,8 @@ enum fat16_read_result fat16_read(const struct fat16_volume* volume, const struc
     void* context)
 {
     unsigned int remaining = file->size, cluster = file->first_cluster;
-    unsigned char data[512];
+    unsigned char data[512], links[512];
+    unsigned int cached_fat = 0;
     if ((unsigned long long)remaining > (unsigned long long)volume->clusters *
         volume->sectors_per_cluster * 512)
         return FAT16_READ_ERROR;
@@ -232,9 +247,13 @@ enum fat16_read_result fat16_read(const struct fat16_volume* volume, const struc
                 return FAT16_READ_STOPPED;
             remaining -= count;
         }
-        if (!ata_read_sector(volume->disk, volume->fat_start + cluster / 256, data))
-            return FAT16_READ_ERROR;
-        cluster = little16(data + (cluster % 256) * 2);
+        const unsigned int sector = volume->fat_start + cluster / 256;
+        if (sector != cached_fat) {
+            if (!ata_read_sector(volume->disk, sector, links))
+                return FAT16_READ_ERROR;
+            cached_fat = sector;
+        }
+        cluster = little16(links + (cluster % 256) * 2);
         if (!remaining)
             return cluster >= 0xfff8 ? FAT16_READ_OK : FAT16_READ_ERROR;
     }

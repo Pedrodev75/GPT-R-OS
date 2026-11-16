@@ -2,7 +2,9 @@
 
 Sistema operacional experimental x86-64 escrito em C e Assembly. Inicia via BIOS com bootloader próprio e é desenvolvido para testes no QEMU.
 
-A **v0.6.0** estreia a área de trabalho em **1024×768** via VBE, com mouse PS/2, barra de tarefas e janelas para o Terminal, o Editor e os programas `.APP`. A fonte bitmap usa escala 2× e o Terminal tem 56 colunas por 27 linhas. O timer PIT alterna a execução dos programas em modo usuário enquanto a interface continua disponível.
+A **v0.6.5** adiciona um Explorador de arquivos com subpastas FAT16, um Gerenciador de tarefas e atalhos salvos no disco. A **Calculadora** é o primeiro `.APP` com interface gráfica e botões clicáveis. O desktop roda em **1024×768** via VBE, com mouse PS/2 e fonte bitmap em escala 2×. O Terminal tem 56 colunas por 27 linhas.
+
+O desktop recompõe apenas as áreas afetadas quando um app gráfico atualiza a janela. O Explorador evita reler a pasta aberta quando as alterações no FAT16 afetam outra pasta.
 
 ## Rodar no QEMU
 
@@ -25,7 +27,32 @@ Com `snapshot=on`, as alterações no disco ficam em uma camada temporária e s�
 | Minimizar ou restaurar | Clique em **−** na barra de título para minimizar e no botão da barra de tarefas para restaurar. |
 | Fechar uma janela | Clique em **x** na barra de título. Se um programa ainda estiver rodando, fechar a janela encerra esse programa. |
 
-O Terminal abre com o sistema. Para editar um arquivo específico, use `edit <arquivo>` no Terminal.
+O Terminal abre com o sistema. Clique duas vezes em **Home** ou **Apps** no desktop para ir direto à pasta pelo Explorador.
+
+### Explorador e atalhos
+
+Abra **F1 → Arquivos** para ver a raiz do disco. A lista exibe ícones, nomes, tipos e tamanhos em bytes. Use **Nova pasta** para criar uma subpasta, **Voltar** para visitar o local anterior e **Subir** para ir à pasta acima. Duplo clique ou **Enter** abre a pasta selecionada, abre `.txt` e `.asm` no Editor ou executa um `.APP`. O Editor salva no mesmo diretório em que o arquivo foi aberto.
+
+| Pasta | Conteúdo |
+|---|---|
+| `HOME/DOCS/` | Espaço para documentos de texto. |
+| `HOME/FONTES/` | Fontes Assembly. Inclui uma cópia de `ola.asm`. |
+| `APPS/` | Programas instalados, incluindo `CALC.APP`. |
+| `CONFIG/` | Dados do desktop. O sistema grava os atalhos em `ATALHOS.DAT`. |
+
+Clique com o botão direito em um item do Explorador e escolha **Criar atalho**. Arraste o ícone no desktop para mudar sua posição. Para conferir se a posição persiste depois de fechar o QEMU, use o modo de disco gravável descrito em [Testar a persistência](#testar-a-persistência).
+
+### Gerenciador de tarefas
+
+Abra **F1 → Tarefas** para ver o PID, o nome, o estado e a visibilidade da janela de cada `.APP`. Selecione um processo e clique em **Encerrar APP**, inclusive se a janela estiver minimizada. O kernel libera a memória do processo e a janela mostra o resultado até você fechá-la.
+
+### Calculadora gráfica
+
+1. Dê duplo clique em **Apps** no desktop e abra `CALC.APP`.
+2. Clique em **7**, **+**, **5** e **=**. O visor deve mostrar **12**.
+3. Arraste a janela pela barra de título e faça outra conta. **C** limpa o visor.
+
+A Calculadora usa as chamadas gráficas de desenho e eventos de clique. Veja a [interface gráfica do formato .APP](docs/app-format.md#interface-gráfica) e o [fonte da Calculadora](apps/CALC.S).
 
 ## Inicialização
 
@@ -78,7 +105,7 @@ O heap aceita de 1 a 4.064 bytes por alocação. O shell mantém até 32 blocos 
 
 Use `ls` para encontrar `README.txt` e `cat README.txt` para ler o arquivo. Na pausa do `cat`, **Espaço** avança uma página, **Enter** avança uma linha e **Esc** volta ao prompt. Ao chegar ao fim, aparece `FIM DO ARQUIVO - FAT16 OK`.
 
-O FAT16 trabalha com o diretório raiz e nomes curtos 8.3. Digite o nome exatamente como aparece no `ls`. Para criar arquivos, use letras sem acento, números, hífen ou sublinhado. Use uma única caixa em cada parte do nome e a extensão `.txt` em minúsculas para novos arquivos de texto. Em `nota.txt`, por exemplo, tanto o nome quanto a extensão estão em minúsculas.
+O Explorador navega por subpastas FAT16. Os comandos de arquivos do shell operam no diretório raiz. O FAT16 usa nomes curtos 8.3. Digite o nome exatamente como aparece no `ls`. Para criar arquivos, use letras sem acento, números, hífen ou sublinhado. Use uma única caixa em cada parte do nome e a extensão `.txt` em minúsculas para novos arquivos de texto. Em `nota.txt`, por exemplo, tanto o nome quanto a extensão estão em minúsculas.
 
 Use `diskinfo` antes e depois de `write nota.txt Pão com ovo` para ver o espaço livre mudar. Leia o resultado com `cat nota.txt` e use `rm nota.txt` para liberar os clusters do arquivo. O comando `sector 0` inspeciona os primeiros bytes do MBR. Na imagem de exemplo, a partição FAT16 começa no setor 2048.
 
@@ -119,7 +146,7 @@ if (!(Test-Path gpt-r-hd-teste.img)) {
   -drive "file=gpt-r-hd-teste.img,format=raw,if=ide,index=0" -boot c
 ```
 
-Digite `write nota.txt Pão com ovo`, feche o QEMU e abra a mesma cópia de novo. Execute `cat nota.txt` para conferir o texto salvo.
+Crie um atalho para `CALC.APP`, arraste o ícone e feche o QEMU. Reabra a mesma cópia para conferir o atalho na posição salva. Para testar texto pelo shell, salve com `write nota.txt Pão com ovo` e confira com `cat nota.txt` depois de reabrir.
 
 ### Diagnóstico
 
@@ -144,15 +171,15 @@ Quando um programa em modo usuário sofre uma exceção, sua janela mostra o vet
 | `boot/` | Bootloader BIOS, leitura do HD, configuração VBE, coleta E820 e layout da imagem. |
 | `kernel/kernel.c` | Inicializa o kernel, mostra o log de boot e chama o shell. |
 | `kernel/apps/` | Carregador `.APP`, chamadas ao kernel, escalonador e montador. |
-| `kernel/desktop/` | Área de trabalho, gerenciamento de janelas e consoles dos programas. |
+| `kernel/desktop/` | Área de trabalho, janelas, Explorador, Gerenciador de tarefas, atalhos e desenho gráfico dos apps. |
 | `kernel/memory/` | Paginação, mapa E820, alocador de páginas físicas e heap. |
 | `kernel/interrupts/` | IDT, entradas de IRQ e diagnóstico de exceções. |
 | `kernel/drivers/` | Teclado PS/2 ABNT2, mouse PS/2, timer PIT, console gráfico VBE e disco ATA PIO. |
-| `kernel/fs/` | Leitura e escrita de volumes FAT16. |
+| `kernel/fs/` | Leitura e escrita de arquivos e pastas FAT16. |
 | `kernel/shell/` | Prompt, histórico, comandos, editor gráfico e módulos de disco, memória e diagnóstico. |
-| `apps/` | Código-fonte dos programas de exemplo. |
+| `apps/` | Código-fonte dos programas de exemplo e da Calculadora. |
 | `tools/Pack-App.ps1` | Empacotador de executáveis `.APP` para Windows. |
-| `docs/app-format.md` | Formato `GTRA`, chamadas ao kernel, sintaxe do montador e exemplos. |
+| `docs/app-format.md` | Formato `GTRA`, chamadas de texto e vídeo, eventos de mouse, sintaxe do montador e exemplos. |
 
 ## Licença
 

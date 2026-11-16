@@ -2,15 +2,27 @@
 
 enum { EMPTY_SLOT = 0, DELETED_SLOT = 0xe5 };
 
-static unsigned int mutations;
+enum { MUTATION_WINDOW = 16 };
+static unsigned int mutations, modified_dir[MUTATION_WINDOW];
 
 unsigned int fat16_mutations(void)
 {
     return mutations;
 }
 
+int fat16_dir_changed(unsigned int directory, unsigned int since)
+{
+    const unsigned int count = mutations - since;
+    if (count > MUTATION_WINDOW)
+        return 1;
+    for (unsigned int i = 0; i < count; ++i)
+        if (modified_dir[(since + i) % MUTATION_WINDOW] == directory)
+            return 1;
+    return 0;
+}
+
 struct edit_entry {
-    unsigned int index, lba, next_lba, tail;
+    unsigned int index, lba, next_lba, tail, directory;
     unsigned int first_cluster;
     unsigned int size;
     int exists;
@@ -74,7 +86,7 @@ static enum fat16_edit_result find_entry(const struct fat16_volume *vol, unsigne
     const struct short_name *name, struct edit_entry *entry, int making_folder)
 {
     struct fat16_dir dir = { .first_cluster = directory };
-    *entry = (struct edit_entry){0};
+    *entry = (struct edit_entry){ .directory = directory };
     const unsigned char *slot;
     int long_name = 0, result;
     while ((result = fat16_slot(vol, &dir, &slot)) > 0) {
@@ -120,7 +132,7 @@ static enum fat16_edit_result find_entry(const struct fat16_volume *vol, unsigne
             if (long_name || (slot[11] & 0x19))
                 return FAT16_EDIT_PROTECTED;
             *entry = (struct edit_entry){
-                .lba = dir.lba, .index = dir.index - 1, .exists = 1,
+                .lba = dir.lba, .index = dir.index - 1, .exists = 1, .directory = directory,
                 .first_cluster = get16(slot + 26),
                 .size = get16(slot + 28) | (get16(slot + 30) << 16)
             };
@@ -279,6 +291,7 @@ static int update_directory(const struct fat16_volume *vol,
     }
     if (!ata_write_sector(vol->disk, entry->lba, sector))
         return 0;
+    modified_dir[mutations % MUTATION_WINDOW] = entry->directory;
     ++mutations;
     return 1;
 }
