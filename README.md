@@ -2,7 +2,7 @@
 
 Sistema operacional experimental x86-64 escrito em C e Assembly. Inicia via BIOS com bootloader próprio e é desenvolvido para testes no QEMU.
 
-A **v0.5.5** permite escrever, montar, inspecionar e rodar programas `.APP` dentro do próprio sistema. Os programas em modo usuário podem receber argumentos e ler o teclado. O shell ganhou histórico, `man` e um editor gráfico. O terminal gráfico roda em 640×480 via VBE, com 49 colunas por 25 linhas.
+A **v0.6.0** estreia a área de trabalho em **1024×768** via VBE, com mouse PS/2, barra de tarefas e janelas para o Terminal, o Editor e os programas `.APP`. A fonte bitmap usa escala 2× e o Terminal tem 56 colunas por 27 linhas. O timer PIT alterna a execução dos programas em modo usuário enquanto a interface continua disponível.
 
 ## Rodar no QEMU
 
@@ -15,9 +15,21 @@ Coloque `gpt-r-hd.img` em uma pasta e abra o PowerShell nela. A imagem contém o
 
 Com `snapshot=on`, as alterações no disco ficam em uma camada temporária e são descartadas ao fechar o QEMU.
 
+## Área de trabalho
+
+| Ação | Como usar |
+|---|---|
+| Abrir o menu | Clique em **Menu** ou pressione **F1**. No menu, use as setas e **Enter**. |
+| Trocar de janela | Clique na janela ou no botão dela na barra de tarefas. **Alt+Tab** e **F2** também alternam entre as janelas abertas. |
+| Mover uma janela | Arraste a barra de título. O contorno indica a posição durante o arraste. |
+| Minimizar ou restaurar | Clique em **−** na barra de título para minimizar e no botão da barra de tarefas para restaurar. |
+| Fechar uma janela | Clique em **x** na barra de título. Se um programa ainda estiver rodando, fechar a janela encerra esse programa. |
+
+O Terminal abre com o sistema. Para editar um arquivo específico, use `edit <arquivo>` no Terminal.
+
 ## Inicialização
 
-Antes do primeiro prompt, o sistema mostra uma linha para cada etapa do boot, incluindo vídeo, IDT, E820, alocador de páginas, heap, timer PIT, teclado PS/2, ATA PIO e montagem do FAT16.
+Antes do primeiro prompt, o sistema mostra uma linha para cada etapa do boot, incluindo vídeo, IDT, E820, alocador de páginas, heap, timer PIT, teclado e mouse PS/2, ATA PIO e montagem do FAT16.
 
 | Indicador | Significado |
 |---|---|
@@ -50,7 +62,7 @@ Digite no prompt `>` e pressione **Enter**. Use **↑** e **↓** para navegar p
 | `sector <LBA>` | Mostra os primeiros 16 bytes de um setor. Informe o LBA em decimal. |
 | `ls` | Lista os nomes, os tamanhos em bytes e as datas de modificação gravadas no diretório raiz do FAT16. |
 | `cat <arquivo>` | Exibe um arquivo de texto UTF-8 com paginação. |
-| `run <arquivo.APP> [argumentos]` | Executa um programa x86-64 em modo usuário. **Ctrl+C** encerra o programa e volta ao prompt. |
+| `run <arquivo.APP> [argumentos]` | Executa um programa x86-64 em modo usuário e abre uma janela com o nome do executável. |
 | `edit <arquivo>` | Abre o editor gráfico de texto UTF-8. |
 | `asm <fonte.asm> <saida.APP>` | Monta um fonte Assembly e grava um executável no FAT16. |
 | `appinfo <arquivo.APP>` | Valida e mostra o cabeçalho do executável. |
@@ -70,9 +82,20 @@ O FAT16 trabalha com o diretório raiz e nomes curtos 8.3. Digite o nome exatame
 
 Use `diskinfo` antes e depois de `write nota.txt Pão com ovo` para ver o espaço livre mudar. Leia o resultado com `cat nota.txt` e use `rm nota.txt` para liberar os clusters do arquivo. O comando `sector 0` inspeciona os primeiros bytes do MBR. Na imagem de exemplo, a partição FAT16 começa no setor 2048.
 
+### Executar vários programas
+
+Cada execução de `run` tem sua própria janela, com saída, pilha e contexto de CPU separados. O desktop suporta até quatro janelas de `.APP`. Quando um programa pede entrada, ele recebe as teclas digitadas na sua janela enquanto ela estiver em foco. **Ctrl+C** encerra o programa em foco. Quando um programa sai ou falha, o kernel libera sua memória e mantém a janela aberta para você ler a saída. Feche a janela para liberar espaço para outro programa.
+
+A imagem de exemplo inclui `loop.APP` e `nome.APP` para testar a multitarefa.
+
+1. No Terminal, execute `run loop.APP`.
+2. Clique em **Terminal** na barra de tarefas e execute `run nome.APP`.
+3. Na janela `nome.APP`, digite seu nome e pressione **Enter**. A saudação e o código de saída aparecem nessa janela.
+4. Selecione `loop.APP` e pressione **Ctrl+C**. A mensagem de interrupção aparece na janela do loop.
+
 ### Crie um programa dentro do GPT-R OS
 
-A imagem vem com `ola.APP`, `ola.asm` e `README.txt`. Abra `edit ola.asm` e mude a mensagem na linha com `db`. O editor mostra números de linha, cursor, rolagem e os atalhos no rodapé. Use **Ctrl+S** para salvar e **Esc** para voltar ao shell.
+A imagem também vem com `ola.APP`, `ola.asm` e `README.txt`. Abra `edit ola.asm` e mude a mensagem na linha com `db`. O editor mostra números de linha, cursor, rolagem e os atalhos no rodapé. Use **Ctrl+S** para salvar e **Esc** para fechar o editor.
 
 ```text
 asm ola.asm feito.APP
@@ -80,7 +103,7 @@ appinfo feito.APP
 run feito.APP
 ```
 
-O programa imprime a sua mensagem e sai com código 0. O montador suporta registradores de 32 e 64 bits, operações aritméticas, memória, saltos condicionais e rotinas com `call` e `ret`. Veja a sintaxe completa, um exemplo de leitura do teclado e os testes de exceção na [documentação do formato .APP](docs/app-format.md).
+O programa imprime a sua mensagem na janela `feito.APP` e sai com código 0. O montador suporta registradores de 32 e 64 bits, operações aritméticas, memória, saltos condicionais e rotinas com `call` e `ret`. Veja a sintaxe completa, um exemplo de leitura do teclado e os testes de exceção na [documentação do formato .APP](docs/app-format.md).
 
 O editor aceita texto UTF-8 de até 4 KiB e salva as quebras de linha em LF. Se houver alterações pendentes ao apertar **Esc**, ele oferece salvar, descartar ou continuar.
 
@@ -112,7 +135,7 @@ Digite `write nota.txt Pão com ovo`, feche o QEMU e abra a mesma cópia de novo
 | `hang` | Desativa as interrupções mascaráveis e entra em loop. Reinicie a VM pelo QEMU para voltar ao prompt. |
 | `triple` | Carrega uma IDT vazia e provoca triple fault. Com as opções padrão, o QEMU reinicia a VM. |
 
-As exceções de um programa em modo usuário devolvem o prompt. As exceções do kernel param na tela de diagnóstico. Ela mostra o vetor, o código de erro e os registradores. Para comparar `mem`, inicie o QEMU uma vez com `-m 64` e outra com `-m 128`.
+Quando um programa em modo usuário sofre uma exceção, sua janela mostra o vetor e o endereço da instrução. Em uma falha de página, ela também mostra o endereço em `CR2`. As exceções do kernel param na tela de diagnóstico. Ela mostra o vetor, o código de erro e os registradores. Para comparar `mem`, inicie o QEMU uma vez com `-m 64` e outra com `-m 128`.
 
 ## Estrutura
 
@@ -120,10 +143,11 @@ As exceções de um programa em modo usuário devolvem o prompt. As exceções d
 |---|---|
 | `boot/` | Bootloader BIOS, leitura do HD, configuração VBE, coleta E820 e layout da imagem. |
 | `kernel/kernel.c` | Inicializa o kernel, mostra o log de boot e chama o shell. |
-| `kernel/apps/` | Carregador `.APP`, chamadas ao kernel, execução em modo usuário e montador. |
+| `kernel/apps/` | Carregador `.APP`, chamadas ao kernel, escalonador e montador. |
+| `kernel/desktop/` | Área de trabalho, gerenciamento de janelas e consoles dos programas. |
 | `kernel/memory/` | Paginação, mapa E820, alocador de páginas físicas e heap. |
 | `kernel/interrupts/` | IDT, entradas de IRQ e diagnóstico de exceções. |
-| `kernel/drivers/` | Teclado PS/2 ABNT2, timer PIT, console gráfico VBE e disco ATA PIO. |
+| `kernel/drivers/` | Teclado PS/2 ABNT2, mouse PS/2, timer PIT, console gráfico VBE e disco ATA PIO. |
 | `kernel/fs/` | Leitura e escrita de volumes FAT16. |
 | `kernel/shell/` | Prompt, histórico, comandos, editor gráfico e módulos de disco, memória e diagnóstico. |
 | `apps/` | Código-fonte dos programas de exemplo. |
