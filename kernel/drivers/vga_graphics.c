@@ -73,6 +73,7 @@ static void draw_text(unsigned int x, unsigned int y, const char *text, unsigned
 
 enum { COLUMNS = CONSOLE_WIDTH, CELL_COUNT = COLUMNS * CONSOLE_HEIGHT };
 static unsigned short cells[CELL_COUNT];
+static unsigned int console_x, console_y;
 /* Zero means hidden, including before the shell starts. */
 static unsigned int cursor_slot;
 static unsigned int cursor_visible;
@@ -230,8 +231,8 @@ static void render_cell(unsigned int cell, unsigned short value)
 {
     const unsigned int foreground = palette[(value >> 8) & 15];
     const unsigned int background = palette[(value >> 12) & 7];
-    const unsigned int x = (cell % COLUMNS) * VGA_CELL_WIDTH;
-    const unsigned int y = (cell / COLUMNS) * VGA_LINE_HEIGHT;
+    const unsigned int x = console_x + (cell % COLUMNS) * VGA_CELL_WIDTH;
+    const unsigned int y = console_y + (cell / COLUMNS) * VGA_LINE_HEIGHT;
     overlay_glyph(x, y, (unsigned char)value, foreground, background);
     vga_graphics_fill(x, y + VGA_OVERLAY_GLYPH_HEIGHT, VGA_CELL_WIDTH,
         VGA_LINE_HEIGHT - VGA_OVERLAY_GLYPH_HEIGHT, background);
@@ -242,8 +243,8 @@ static void redraw_cursor(void)
     const unsigned int cell = cursor_slot - 1;
     render_cell(cell, cells[cell]);
     if (cursor_visible)
-        rect(cell % COLUMNS * VGA_CELL_WIDTH,
-            cell / COLUMNS * VGA_LINE_HEIGHT + VGA_OVERLAY_GLYPH_HEIGHT,
+        rect(console_x + cell % COLUMNS * VGA_CELL_WIDTH,
+            console_y + cell / COLUMNS * VGA_LINE_HEIGHT + VGA_OVERLAY_GLYPH_HEIGHT,
             VGA_CELL_WIDTH, 1, 15);
 }
 
@@ -298,6 +299,7 @@ void vga_graphics_init(void)
     pitch = *(const volatile unsigned short*)0x6410;
     video = (volatile unsigned char*)(0x100000000ull + (physical & 0x1fffff));
     init_palette();
+    console_x = console_y = 0;
     cursor_slot = 0;
     cursor_visible = 0;
     overlay_active = 0;
@@ -310,12 +312,18 @@ void vga_graphics_begin_overlay(void)
     overlay_active = 1;
 }
 
-void vga_graphics_restore_console(void)
+void vga_graphics_place_console(unsigned int x, unsigned int y)
 {
-    if (!overlay_active)
-        return;
+    if (x <= WIDTH - COLUMNS * VGA_CELL_WIDTH &&
+        y <= HEIGHT - CONSOLE_HEIGHT * VGA_LINE_HEIGHT) {
+        console_x = x;
+        console_y = y;
+    }
+}
 
-    /* Timer IRQ updates the shadow cells while the overlay owns the screen. */
+static void present_console(int resume)
+{
+    /* The timer can update the second row while the overlay owns the screen. */
     for (unsigned int cell = 0; cell < CELL_COUNT; ++cell)
         if (cell / COLUMNS != 1)
             render_cell(cell, cells[cell]);
@@ -324,10 +332,21 @@ void vga_graphics_restore_console(void)
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
     for (unsigned int cell = COLUMNS; cell < 2 * COLUMNS; ++cell)
         render_cell(cell, cells[cell]);
-    overlay_active = 0;
+    if (resume)
+        overlay_active = 0;
     if (flags & 0x200)
         __asm__ volatile ("sti" : : : "memory");
-    clear_console_margins();
+}
+
+void vga_graphics_snapshot_console(void)
+{
+    present_console(0);
+}
+
+void vga_graphics_restore_console(void)
+{
+    if (overlay_active)
+        present_console(1);
 }
 
 void vga_graphics_demo(struct keyboard_state* keyboard)
@@ -380,5 +399,4 @@ void vga_graphics_demo(struct keyboard_state* keyboard)
         if (!key)
             __asm__ volatile ("hlt" : : : "memory");
     }
-    vga_graphics_restore_console();
 }

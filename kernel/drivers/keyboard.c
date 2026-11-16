@@ -190,6 +190,8 @@ unsigned int keyboard_poll(struct keyboard_state *keyboard)
             default: continue;
             }
         }
+        if (key == 0x3b)
+            return KEY_F1;
         if (key == 1) {
             keyboard->accent = 0;
             return KEY_ESCAPE;

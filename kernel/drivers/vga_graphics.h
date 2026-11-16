@@ -21,6 +21,8 @@ void vga_graphics_blink(void);
 struct keyboard_state;
 void vga_graphics_demo(struct keyboard_state* keyboard);
 void vga_graphics_begin_overlay(void);
+void vga_graphics_place_console(unsigned int x, unsigned int y);
+void vga_graphics_snapshot_console(void);
 void vga_graphics_fill(unsigned int x, unsigned int y, unsigned int width,
     unsigned int height, unsigned int rgb);
 void vga_graphics_overlay_glyph(unsigned int x, unsigned int y,

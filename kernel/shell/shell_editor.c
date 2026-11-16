@@ -1,24 +1,25 @@
 #include "shell_internal.h"
 #include "../drivers/keyboard.h"
+#include "../desktop/desktop.h"
 
 #ifdef GPT_R_GRAPHICS
 
 enum {
     TEXT_LIMIT = 4096,
     CELL = VGA_OVERLAY_CELL_WIDTH, ROW_HEIGHT = VGA_LINE_HEIGHT,
-    HEADER_HEIGHT = 54, FOOTER_Y = VGA_GRAPHICS_HEIGHT - 62,
-    VIEW_X = 92, VIEW_Y = HEADER_HEIGHT + 8,
-    ROW_RIGHT = VGA_GRAPHICS_WIDTH - 22, SCROLL_X = VGA_GRAPHICS_WIDTH - 11,
+    EDITOR_WIDTH = DESKTOP_EDITOR_WIDTH, EDITOR_HEIGHT = DESKTOP_EDITOR_HEIGHT,
+    FOOTER_Y = EDITOR_HEIGHT - 62,
+    VIEW_X = 92, VIEW_Y = 10,
+    ROW_RIGHT = EDITOR_WIDTH - 22, SCROLL_X = EDITOR_WIDTH - 11,
     VIEW_ROWS = (FOOTER_Y - VIEW_Y) / ROW_HEIGHT,
     VIEW_COLS = (ROW_RIGHT - VIEW_X) / CELL,
     LINE_NUMBER_RIGHT = VIEW_X - 16, LINE_NUMBER_WIDTH = 4 * CELL,
-    HEADER_TEXT_Y = (HEADER_HEIGHT - VGA_OVERLAY_GLYPH_HEIGHT) / 2,
-    BADGE_WIDTH = 138, BADGE_X = VGA_GRAPHICS_WIDTH - BADGE_WIDTH - 16,
+    BADGE_WIDTH = 138, BADGE_X = EDITOR_WIDTH - BADGE_WIDTH - 12,
     STATUS_Y = FOOTER_Y + 7, SHORTCUTS_Y = FOOTER_Y + 33,
-    COLUMN_RIGHT = 270, NOTICE_X = 290, ENCODING_X = VGA_GRAPHICS_WIDTH - 100,
+    COLUMN_RIGHT = 270, NOTICE_X = 280, ENCODING_X = EDITOR_WIDTH - 90,
     DIALOG_WIDTH = 560, DIALOG_HEIGHT = 140,
-    DIALOG_LEFT = (VGA_GRAPHICS_WIDTH - DIALOG_WIDTH) / 2,
-    DIALOG_TOP = (VGA_GRAPHICS_HEIGHT - DIALOG_HEIGHT) / 2,
+    DIALOG_LEFT = (EDITOR_WIDTH - DIALOG_WIDTH) / 2,
+    DIALOG_TOP = (EDITOR_HEIGHT - DIALOG_HEIGHT) / 2,
     BACKGROUND = 0x0b1423, PANEL = 0x142338, ACTIVE = 0x1a2c45,
     BORDER = 0x2e415c, LABEL = 0x9bacc4, TEXT = 0xe7eef8, ACCENT = 0x61dcf5,
     MUTED = 0x8095ac, UNSAVED = 0xffcb82
@@ -252,17 +253,29 @@ static void apply_key(struct editor *edit, unsigned int key)
     }
 }
 
+static void fill(unsigned int x, unsigned int y, unsigned int width,
+    unsigned int height, unsigned int rgb)
+{
+    vga_graphics_fill(DESKTOP_EDITOR_CLIENT_X + x, DESKTOP_EDITOR_CLIENT_Y + y,
+        width, height, rgb);
+}
+
+static void glyph(unsigned int x, unsigned int y, unsigned char ch, unsigned int rgb)
+{
+    vga_graphics_overlay_glyph(DESKTOP_EDITOR_CLIENT_X + x, DESKTOP_EDITOR_CLIENT_Y + y, ch, rgb);
+}
+
 static void label(unsigned int x, unsigned int y, const char *text, unsigned int rgb)
 {
     for (; *text; ++text, x += CELL)
-        vga_graphics_overlay_glyph(x, y, (unsigned char)*text, rgb);
+        glyph(x, y, (unsigned char)*text, rgb);
 }
 
 static void right_number(unsigned int x, unsigned int y, unsigned int number, unsigned int rgb)
 {
     do {
         x -= CELL;
-        vga_graphics_overlay_glyph(x, y, '0' + number % 10, rgb);
+        glyph(x, y, '0' + number % 10, rgb);
         number /= 10;
     } while (number);
 }
@@ -296,14 +309,14 @@ static void paint_row(unsigned int index, const struct editor_row *next, int for
     const unsigned int gutter = next->active ? ACTIVE : PANEL;
     const int repaint_background = force || next->active != old->active;
     if (repaint_background) {
-        vga_graphics_fill(0, y, VIEW_X - 8, ROW_HEIGHT, gutter);
-        vga_graphics_fill(VIEW_X - 8, y, 8, ROW_HEIGHT, background);
+        fill(0, y, VIEW_X - 8, ROW_HEIGHT, gutter);
+        fill(VIEW_X - 8, y, 8, ROW_HEIGHT, background);
         const unsigned int text_right = VIEW_X + CELL * VIEW_COLS;
-        vga_graphics_fill(text_right, y, ROW_RIGHT - text_right, ROW_HEIGHT, background);
+        fill(text_right, y, ROW_RIGHT - text_right, ROW_HEIGHT, background);
     }
     if (repaint_background || next->number != old->number) {
         if (!repaint_background)
-            vga_graphics_fill(LINE_NUMBER_RIGHT - LINE_NUMBER_WIDTH, y,
+            fill(LINE_NUMBER_RIGHT - LINE_NUMBER_WIDTH, y,
                 LINE_NUMBER_WIDTH, ROW_HEIGHT, gutter);
         if (next->number)
             right_number(LINE_NUMBER_RIGHT, y, next->number, next->active ? ACCENT : MUTED);
@@ -317,14 +330,15 @@ static void paint_row(unsigned int index, const struct editor_row *next, int for
 
         const unsigned int x = VIEW_X + col * CELL;
         if (!glyph || glyph == ' ') {
-            vga_graphics_fill(x, y, CELL, ROW_HEIGHT, background);
+            fill(x, y, CELL, ROW_HEIGHT, background);
         } else {
-            vga_graphics_overlay_cell(x, y, glyph, next->ink, background);
-            vga_graphics_fill(x, y + VGA_OVERLAY_GLYPH_HEIGHT, CELL,
+            vga_graphics_overlay_cell(DESKTOP_EDITOR_CLIENT_X + x,
+                DESKTOP_EDITOR_CLIENT_Y + y, glyph, next->ink, background);
+            fill(x, y + VGA_OVERLAY_GLYPH_HEIGHT, CELL,
                 ROW_HEIGHT - VGA_OVERLAY_GLYPH_HEIGHT, background);
         }
         if (caret)
-            vga_graphics_fill(x, y + 1, 2, ROW_HEIGHT - 2, ACCENT);
+            fill(x, y + 1, 2, ROW_HEIGHT - 2, ACCENT);
     }
     *old = *next;
 }
@@ -377,24 +391,19 @@ static void draw_scrollbar(unsigned int top, unsigned int lines)
         y += (height - thumb) * top / (lines - VIEW_ROWS);
     }
     if (!view.initialized || y != view.scroll_y || thumb != view.scroll_size) {
-        vga_graphics_fill(SCROLL_X, VIEW_Y, 3, height, thumb ? BORDER : BACKGROUND);
+        fill(SCROLL_X, VIEW_Y, 3, height, thumb ? BORDER : BACKGROUND);
         if (thumb)
-            vga_graphics_fill(SCROLL_X, y, 3, thumb, MUTED);
+            fill(SCROLL_X, y, 3, thumb, MUTED);
         view.scroll_y = y;
         view.scroll_size = thumb;
     }
 }
 
-static void draw_frame(const unsigned char *name)
+static void draw_frame(void)
 {
-    vga_graphics_fill(0, 0, VGA_GRAPHICS_WIDTH, VGA_GRAPHICS_HEIGHT, BACKGROUND);
-    vga_graphics_fill(0, 0, VGA_GRAPHICS_WIDTH, HEADER_HEIGHT, PANEL);
-    vga_graphics_fill(0, HEADER_HEIGHT - 1, VGA_GRAPHICS_WIDTH, 1, BORDER);
-    vga_graphics_fill(0, 0, 4, HEADER_HEIGHT, ACCENT);
-    label(16, HEADER_TEXT_Y, "EDITOR", LABEL);
-    label(132, HEADER_TEXT_Y, (const char *)name, TEXT);
-    vga_graphics_fill(0, FOOTER_Y, VGA_GRAPHICS_WIDTH, VGA_GRAPHICS_HEIGHT - FOOTER_Y, PANEL);
-    vga_graphics_fill(0, FOOTER_Y, VGA_GRAPHICS_WIDTH, 1, BORDER);
+    fill(0, 0, EDITOR_WIDTH, EDITOR_HEIGHT, BACKGROUND);
+    fill(0, FOOTER_Y, EDITOR_WIDTH, EDITOR_HEIGHT - FOOTER_Y, PANEL);
+    fill(0, FOOTER_Y, EDITOR_WIDTH, 1, BORDER);
     label(16, STATUS_Y, "Ln", LABEL);
     label(132, STATUS_Y, "Col", LABEL);
     label(ENCODING_X, STATUS_Y, "UTF-8", MUTED);
@@ -405,25 +414,25 @@ static void draw_status(const struct editor *edit, unsigned int line, unsigned i
 {
     const int status = edit->changed ? 2 : edit->exists ? 1 : 0;
     if (!view.initialized || status != view.status) {
-        vga_graphics_fill(BADGE_X, 12, BADGE_WIDTH, 30, ACTIVE);
-        label(BADGE_X + 12, HEADER_TEXT_Y, status == 2 ? "EDITADO" :
+        fill(BADGE_X, SHORTCUTS_Y - 4, BADGE_WIDTH, 28, ACTIVE);
+        label(BADGE_X + 12, SHORTCUTS_Y, status == 2 ? "EDITADO" :
             status == 1 ? "SALVO" : "NOVO", status == 2 ? UNSAVED : ACCENT);
         view.status = status;
     }
     if (!view.initialized || line != view.line) {
         const unsigned int right = 116;
-        vga_graphics_fill(right - 4 * CELL, STATUS_Y, 4 * CELL, VGA_OVERLAY_GLYPH_HEIGHT, PANEL);
+        fill(right - 4 * CELL, STATUS_Y, 4 * CELL, VGA_OVERLAY_GLYPH_HEIGHT, PANEL);
         right_number(right, STATUS_Y, line + 1, TEXT);
         view.line = line;
     }
     if (!view.initialized || col != view.column) {
-        vga_graphics_fill(COLUMN_RIGHT - 5 * CELL, STATUS_Y, 5 * CELL,
+        fill(COLUMN_RIGHT - 5 * CELL, STATUS_Y, 5 * CELL,
             VGA_OVERLAY_GLYPH_HEIGHT, PANEL);
         right_number(COLUMN_RIGHT, STATUS_Y, col + 1, TEXT);
         view.column = col;
     }
     if (!view.initialized || edit->notice != view.notice) {
-        vga_graphics_fill(NOTICE_X, STATUS_Y, ENCODING_X - NOTICE_X - 8,
+        fill(NOTICE_X, STATUS_Y, ENCODING_X - NOTICE_X - 8,
             VGA_OVERLAY_GLYPH_HEIGHT, PANEL);
         if (edit->notice)
             label(NOTICE_X, STATUS_Y, edit->notice, UNSAVED);
@@ -454,7 +463,7 @@ static void draw_editor(struct editor *edit, const unsigned char *name)
         edit->left = col - VIEW_COLS + 1;
 
     if (!view.initialized)
-        draw_frame(name);
+        draw_frame();
     unsigned int name_length = 0;
     while (name[name_length])
         ++name_length;
@@ -465,9 +474,9 @@ static void draw_editor(struct editor *edit, const unsigned char *name)
 
     if (edit->confirming && !view.confirming) {
         const unsigned int text_x = DIALOG_LEFT + 24;
-        vga_graphics_fill(DIALOG_LEFT, DIALOG_TOP, DIALOG_WIDTH, DIALOG_HEIGHT, BORDER);
-        vga_graphics_fill(DIALOG_LEFT + 2, DIALOG_TOP + 2, DIALOG_WIDTH - 4, DIALOG_HEIGHT - 4, PANEL);
-        vga_graphics_fill(DIALOG_LEFT + 2, DIALOG_TOP + 2, DIALOG_WIDTH - 4, 3, UNSAVED);
+        fill(DIALOG_LEFT, DIALOG_TOP, DIALOG_WIDTH, DIALOG_HEIGHT, BORDER);
+        fill(DIALOG_LEFT + 2, DIALOG_TOP + 2, DIALOG_WIDTH - 4, DIALOG_HEIGHT - 4, PANEL);
+        fill(DIALOG_LEFT + 2, DIALOG_TOP + 2, DIALOG_WIDTH - 4, 3, UNSAVED);
         label(text_x, DIALOG_TOP + 20, "Alteracoes sem salvar", UNSAVED);
         label(text_x, DIALOG_TOP + 59, "S Salvar e sair    D Descartar", TEXT);
         label(text_x, DIALOG_TOP + 100, "Esc Continuar editando", LABEL);
@@ -548,7 +557,7 @@ void shell_edit(unsigned int *row, const unsigned char *argument)
     }
 
     view.initialized = view.confirming = 0;
-    vga_graphics_begin_overlay();
+    desktop_show_editor(name);
     for (;;) {
         draw_editor(&edit, name);
         const unsigned int key = shell_wait_key();
@@ -572,7 +581,7 @@ void shell_edit(unsigned int *row, const unsigned char *argument)
             apply_key(&edit, key);
         }
     }
-    vga_graphics_restore_console();
+    desktop_show_terminal();
 }
 
 #endif

@@ -13,7 +13,8 @@ enum {
     KEY_SAVE,
     KEY_HOME,
     KEY_END,
-    KEY_DELETE
+    KEY_DELETE,
+    KEY_F1
 };
 
 struct keyboard_state {
