@@ -15,10 +15,28 @@ static unsigned int palette[256];
 /* A 1024-pixel RGB row fits in one page. Pages may be physically scattered. */
 _Static_assert(WIDTH * sizeof(unsigned int) <= PAGE_SIZE, "Framebuffer row exceeds one page");
 static struct frame_row {
-    unsigned int *pixels;
+    unsigned int *pixels, *shown;
     unsigned short left, right;
 } frame_rows[HEIGHT];
-static int frame_storage, frame_active;
+static int frame_storage, frame_active, screen_cached, screen_ready;
+static unsigned int clip_left, clip_top, clip_right, clip_bottom;
+static unsigned int mouse_x, mouse_y;
+static int mouse_visible;
+static struct {
+    unsigned int x, y, width, height;
+} drag_outline;
+
+void vga_graphics_clip(unsigned int x, unsigned int y, unsigned int width, unsigned int height)
+{
+    if (x > WIDTH)
+        x = WIDTH;
+    if (y > HEIGHT)
+        y = HEIGHT;
+    clip_left = x;
+    clip_top = y;
+    clip_right = width < WIDTH - x ? x + width : WIDTH;
+    clip_bottom = height < HEIGHT - y ? y + height : HEIGHT;
+}
 
 static int allocate_frame(void)
 {
@@ -31,6 +49,17 @@ static int allocate_frame(void)
             return -1;
         }
     }
+
+    /* Retain the last presented scene in RAM so unchanged pixels skip VRAM I/O. */
+    for (row = 0; row < HEIGHT; ++row) {
+        frame_rows[row].shown = page_alloc();
+        if (!frame_rows[row].shown) {
+            while (row)
+                page_free(frame_rows[--row].shown);
+            return 1;
+        }
+    }
+    screen_cached = 1;
     return 1;
 }
 
@@ -83,6 +112,175 @@ static void put_pixel(volatile unsigned char* pixel, unsigned int rgb)
     pixel[1] = rgb >> 8;
     pixel[2] = rgb >> 16;
 }
+static void present_pixel(volatile unsigned char *pixel, unsigned int *cached, unsigned int rgb)
+{
+    if (cached) {
+        if (screen_ready && *cached == rgb)
+            return;
+        *cached = rgb;
+    }
+    put_pixel(pixel, rgb);
+}
+
+/* Four BGR pixels occupy three aligned 32-bit writes. */
+static void put_four(volatile unsigned char *pixel, const unsigned int *colors)
+{
+    volatile unsigned int *words = (volatile unsigned int *)pixel;
+    words[0] = colors[0] | (colors[1] << 24);
+    words[1] = (colors[1] >> 8) | (colors[2] << 16);
+    words[2] = (colors[2] >> 16) | (colors[3] << 8);
+}
+
+static void present_row(unsigned int y, const struct frame_row *row)
+{
+    unsigned int x = row->left;
+    volatile unsigned char *pixel = video + y * pitch + x * 3;
+    unsigned int *shown = screen_cached ? row->shown : 0;
+    for (; x < row->right && ((unsigned long long)pixel & 3); ++x, pixel += 3)
+        present_pixel(pixel, shown ? shown + x : 0, row->pixels[x]);
+    for (; x + 4 <= row->right; x += 4, pixel += 12) {
+        const unsigned int *colors = row->pixels + x;
+        unsigned int *previous = shown ? shown + x : 0;
+        if (previous && screen_ready && previous[0] == colors[0] && previous[1] == colors[1] &&
+            previous[2] == colors[2] && previous[3] == colors[3])
+            continue;
+        put_four(pixel, colors);
+        if (previous)
+            for (unsigned int i = 0; i < 4; ++i)
+                previous[i] = colors[i];
+    }
+    for (; x < row->right; ++x, pixel += 3)
+        present_pixel(pixel, shown ? shown + x : 0, row->pixels[x]);
+}
+
+enum { OUTLINE_THICKNESS = 2, OUTLINE_COLOR = 0x61dcf5 };
+
+static int outline_at(unsigned int x, unsigned int y)
+{
+    if (!drag_outline.width || x < drag_outline.x || y < drag_outline.y)
+        return 0;
+    x -= drag_outline.x;
+    y -= drag_outline.y;
+    return x < drag_outline.width && y < drag_outline.height &&
+        (x < OUTLINE_THICKNESS || x >= drag_outline.width - OUTLINE_THICKNESS ||
+         y < OUTLINE_THICKNESS || y >= drag_outline.height - OUTLINE_THICKNESS);
+}
+
+static void paint_outline_area(unsigned int left, unsigned int top,
+    unsigned int right, unsigned int bottom, int erase)
+{
+    if (!drag_outline.width)
+        return;
+    const unsigned int x0 = drag_outline.x, y0 = drag_outline.y;
+    const unsigned int x1 = x0 + drag_outline.width, y1 = y0 + drag_outline.height;
+    if (left < x0)
+        left = x0;
+    if (right > x1)
+        right = x1;
+    if (top < y0)
+        top = y0;
+    if (bottom > y1)
+        bottom = y1;
+    if (left >= right || top >= bottom)
+        return;
+
+    for (unsigned int y = top; y < bottom; ++y) {
+        const int horizontal = y < y0 + OUTLINE_THICKNESS || y >= y1 - OUTLINE_THICKNESS;
+        unsigned int x = left;
+        while (x < right) {
+            if (!horizontal && x >= x0 + OUTLINE_THICKNESS && x < x1 - OUTLINE_THICKNESS) {
+                x = x1 - OUTLINE_THICKNESS;
+                continue;
+            }
+            const unsigned int rgb = erase ? frame_rows[y].pixels[x] : OUTLINE_COLOR;
+            put_pixel(video + y * pitch + x * 3, rgb);
+            ++x;
+        }
+    }
+}
+
+enum { POINTER_WIDTH = 13, POINTER_HEIGHT = 19 };
+
+static void paint_pointer(int erase)
+{
+    static const unsigned short outline[POINTER_HEIGHT] = {
+        0x1000,0x1800,0x1c00,0x1e00,0x1f00,0x1f80,0x1fc0,0x1fe0,0x1ff0,0x1ff8,
+        0x1ffc,0x1ffe,0x1fff,0x1fe0,0x1cf0,0x1878,0x1038,0x0018,0
+    };
+    static const unsigned short inside[POINTER_HEIGHT] = {
+        0,0,0x0800,0x0c00,0x0e00,0x0f00,0x0f80,0x0fc0,0x0fe0,0x0ff0,
+        0x0ff8,0x0ffc,0x0fe0,0x0ce0,0x0870,0x0030,0x0010,0,0
+    };
+    if (!mouse_visible || frame_storage <= 0)
+        return;
+    for (unsigned int dy = 0; dy < POINTER_HEIGHT && mouse_y + dy < HEIGHT; ++dy) {
+        const unsigned int y = mouse_y + dy;
+        volatile unsigned char *pixel = video + y * pitch + mouse_x * 3;
+        for (unsigned int dx = 0; dx < POINTER_WIDTH && mouse_x + dx < WIDTH; ++dx) {
+            const unsigned int bit = 0x1000 >> dx;
+            if (outline[dy] & bit) {
+                const unsigned int x = mouse_x + dx;
+                const unsigned int rgb = erase ?
+                    (outline_at(x, y) ? OUTLINE_COLOR : frame_rows[y].pixels[x]) :
+                    (inside[dy] & bit ? 0xf5fcff : 0x122035);
+                put_pixel(pixel + dx * 3, rgb);
+            }
+        }
+    }
+}
+
+static void refresh_overlays(unsigned int x, unsigned int y, unsigned int right, unsigned int bottom)
+{
+    paint_outline_area(x, y, right, bottom, 0);
+    if (mouse_visible && x < mouse_x + POINTER_WIDTH && right > mouse_x &&
+        y < mouse_y + POINTER_HEIGHT && bottom > mouse_y)
+        paint_pointer(0);
+}
+
+void vga_graphics_mouse_cursor(unsigned int x, unsigned int y, int visible)
+{
+    visible = visible && x < WIDTH && y < HEIGHT;
+    if (mouse_visible == visible && (!visible || (mouse_x == x && mouse_y == y)))
+        return;
+    unsigned long long flags;
+    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
+    paint_pointer(1);
+    mouse_x = x;
+    mouse_y = y;
+    mouse_visible = visible;
+    paint_pointer(0);
+    if (flags & 0x200)
+        __asm__ volatile ("sti" : : : "memory");
+}
+
+void vga_graphics_drag_outline(unsigned int x, unsigned int y,
+    unsigned int width, unsigned int height)
+{
+    if (frame_storage <= 0 || x >= WIDTH || y >= HEIGHT)
+        return;
+    if (width > WIDTH - x)
+        width = WIDTH - x;
+    if (height > HEIGHT - y)
+        height = HEIGHT - y;
+    if (width < 2 * OUTLINE_THICKNESS || height < 2 * OUTLINE_THICKNESS)
+        width = height = 0;
+    if (drag_outline.width == width && (!width ||
+        (drag_outline.x == x && drag_outline.y == y && drag_outline.height == height)))
+        return;
+
+    unsigned long long flags;
+    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
+    paint_outline_area(0, 0, WIDTH, HEIGHT, 1);
+    drag_outline.x = x;
+    drag_outline.y = y;
+    drag_outline.width = width;
+    drag_outline.height = height;
+    paint_outline_area(0, 0, WIDTH, HEIGHT, 0);
+    paint_pointer(0);
+    if (flags & 0x200)
+        __asm__ volatile ("sti" : : : "memory");
+}
+
 void vga_graphics_end_frame(void)
 {
     if (!frame_active)
@@ -91,11 +289,12 @@ void vga_graphics_end_frame(void)
         const struct frame_row *row = &frame_rows[y];
         if (row->left >= row->right)
             continue;
-        volatile unsigned char *pixel = video + y * pitch + row->left * 3;
-        for (unsigned int x = row->left; x < row->right; ++x, pixel += 3)
-            put_pixel(pixel, row->pixels[x]);
+        present_row(y, row);
     }
+    screen_ready = screen_cached;
     frame_active = 0;
+    paint_outline_area(0, 0, WIDTH, HEIGHT, 0);
+    paint_pointer(0);
 }
 
 /* boot.S copies the BIOS 8x8 font here before entering long mode. */
@@ -104,26 +303,30 @@ static const unsigned char* const font = (const unsigned char*)0x6000;
 void vga_graphics_fill(unsigned int x, unsigned int y, unsigned int width,
     unsigned int height, unsigned int rgb)
 {
-    if (x >= WIDTH || y >= HEIGHT)
+    const unsigned int right = x + width < clip_right ? x + width : clip_right;
+    const unsigned int bottom = y + height < clip_bottom ? y + height : clip_bottom;
+    if (x < clip_left)
+        x = clip_left;
+    if (y < clip_top)
+        y = clip_top;
+    if (x >= right || y >= bottom)
         return;
-    if (width > WIDTH - x)
-        width = WIDTH - x;
-    if (height > HEIGHT - y)
-        height = HEIGHT - y;
 
-    for (unsigned int line = y; line < y + height; ++line) {
+    for (unsigned int line = y; line < bottom; ++line) {
         struct frame_row *row = &frame_rows[line];
         if (frame_storage > 0)
-            for (unsigned int col = x; col < x + width; ++col)
+            for (unsigned int col = x; col < right; ++col)
                 row->pixels[col] = rgb;
         if (frame_active) {
-            mark_span(row, x, x + width);
+            mark_span(row, x, right);
         } else {
             volatile unsigned char *pixel = video + line * pitch + x * 3;
-            for (unsigned int col = 0; col < width; ++col, pixel += 3)
-                put_pixel(pixel, rgb);
+            for (unsigned int col = x; col < right; ++col, pixel += 3)
+                present_pixel(pixel, screen_cached ? row->shown + col : 0, rgb);
         }
     }
+    if (!frame_active)
+        refresh_overlays(x, y, right, bottom);
 }
 
 static void rect(unsigned int x, unsigned int y, unsigned int width,
@@ -268,26 +471,33 @@ static unsigned char glyph_row(unsigned char ch, unsigned int row)
 static void overlay_glyph(unsigned int x, unsigned int y,
     unsigned char glyph, unsigned int rgb, unsigned int background)
 {
-    if (x > WIDTH - VGA_OVERLAY_CELL_WIDTH || y > HEIGHT - VGA_OVERLAY_GLYPH_HEIGHT)
+    const unsigned int left = x < clip_left ? clip_left : x;
+    const unsigned int top = y < clip_top ? clip_top : y;
+    const unsigned int right = x + VGA_OVERLAY_CELL_WIDTH < clip_right ?
+        x + VGA_OVERLAY_CELL_WIDTH : clip_right;
+    const unsigned int bottom = y + VGA_OVERLAY_GLYPH_HEIGHT < clip_bottom ?
+        y + VGA_OVERLAY_GLYPH_HEIGHT : clip_bottom;
+    if (left >= right || top >= bottom)
         return;
-    for (unsigned int row = 0; row < VGA_OVERLAY_GLYPH_HEIGHT; ++row) {
-        const unsigned int source_y = row / VGA_GLYPH_SCALE;
-        const unsigned char bits = glyph_row(glyph, source_y);
-        struct frame_row *line = &frame_rows[y + row];
-        volatile unsigned char *pixels = video + (y + row) * pitch + x * 3;
-        for (unsigned int col = 0; col < VGA_OVERLAY_CELL_WIDTH; ++col) {
-            const unsigned int source_x = col / VGA_GLYPH_SCALE;
+    for (unsigned int row = top; row < bottom; ++row) {
+        const unsigned char bits = glyph_row(glyph, (row - y) / VGA_GLYPH_SCALE);
+        struct frame_row *line = &frame_rows[row];
+        volatile unsigned char *pixels = video + row * pitch;
+        if (frame_active && (bits || background <= 0xffffff))
+            mark_span(line, left, right);
+        for (unsigned int col = left; col < right; ++col) {
+            const unsigned int source_x = (col - x) / VGA_GLYPH_SCALE;
             const unsigned int color = bits & (0x80 >> source_x) ? rgb : background;
             if (color > 0xffffff)
                 continue;
             if (frame_storage > 0)
-                line->pixels[x + col] = color;
-            if (frame_active)
-                mark_span(line, x + col, x + col + 1);
-            else
-                put_pixel(pixels + col * 3, color);
+                line->pixels[col] = color;
+            if (!frame_active)
+                present_pixel(pixels + col * 3, screen_cached ? line->shown + col : 0, color);
         }
     }
+    if (!frame_active)
+        refresh_overlays(left, top, right, bottom);
 }
 
 void vga_graphics_overlay_glyph(unsigned int x, unsigned int y,
@@ -308,6 +518,10 @@ static void render_cell(unsigned int cell, unsigned short value)
     const unsigned int background = palette[(value >> 12) & 7];
     const unsigned int x = console_x + (cell % COLUMNS) * VGA_CELL_WIDTH;
     const unsigned int y = console_y + (cell / COLUMNS) * VGA_LINE_HEIGHT;
+    if ((unsigned char)value == ' ') {
+        vga_graphics_fill(x, y, VGA_CELL_WIDTH, VGA_LINE_HEIGHT, background);
+        return;
+    }
     overlay_glyph(x, y, (unsigned char)value, foreground, background);
     vga_graphics_fill(x, y + VGA_OVERLAY_GLYPH_HEIGHT, VGA_CELL_WIDTH,
         VGA_LINE_HEIGHT - VGA_OVERLAY_GLYPH_HEIGHT, background);
@@ -339,6 +553,8 @@ unsigned short vga_graphics_get(unsigned int cell)
 
 void vga_graphics_cursor(unsigned int cell)
 {
+    if (overlay_active && cell < CELL_COUNT)
+        return;
     unsigned long long flags;
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
     if (cursor_slot)
@@ -374,7 +590,10 @@ void vga_graphics_init(void)
     pitch = *(const volatile unsigned short*)0x6410;
     video = (volatile unsigned char*)(0x100000000ull + (physical & 0x1fffff));
     init_palette();
-    frame_storage = frame_active = 0;
+    frame_storage = frame_active = mouse_visible = 0;
+    screen_cached = screen_ready = 0;
+    drag_outline.width = 0;
+    vga_graphics_clip(0, 0, WIDTH, HEIGHT);
     console_x = console_y = 0;
     cursor_slot = 0;
     cursor_visible = 0;
@@ -463,6 +682,7 @@ void vga_graphics_demo(struct keyboard_state* keyboard)
     unsigned int color = 0;
     unsigned int last = timer_ticks();
 
+    vga_graphics_mouse_cursor(0, 0, 0);
     vga_graphics_begin_overlay();
     vga_graphics_begin_frame();
     rect(0, 0, WIDTH, HEIGHT, 0);

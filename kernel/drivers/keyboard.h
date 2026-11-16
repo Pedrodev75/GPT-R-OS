@@ -14,13 +14,14 @@ enum {
     KEY_HOME,
     KEY_END,
     KEY_DELETE,
-    KEY_F1
+    KEY_F1,
+    KEY_SWITCH_WINDOW
 };
 
 struct keyboard_state {
     unsigned int shifts;
     int caps;
-    int caps_down;
+    int caps_down, alt_down;
     unsigned char accent;
     unsigned char pending;
     unsigned char extended;

@@ -122,7 +122,7 @@ static void command_demo(unsigned int *row, const unsigned char *argument)
     (void)row;
     (void)argument;
     vga_graphics_demo(&keyboard);
-    desktop_show_terminal();
+    desktop_repaint();
 }
 #endif
 
@@ -297,7 +297,7 @@ _Noreturn void shell_run(unsigned int row)
     unsigned char line[MAX_INPUT + 1], draft[MAX_INPUT + 1];
     shell_memory_init();
 #ifdef GPT_R_GRAPHICS
-    desktop_show_terminal();
+    desktop_init();
 #endif
 
     for (;;) {
@@ -306,23 +306,11 @@ _Noreturn void shell_run(unsigned int row)
         for (;;) {
             const unsigned int col = PROMPT_WIDTH + length;
             shell_move_cursor(row, col < WIDTH ? col : WIDTH - 1);
-            const unsigned int key = shell_wait_key();
 #ifdef GPT_R_GRAPHICS
+            const unsigned int key = desktop_wait_key(&keyboard, &row);
             vga_graphics_cursor(WIDTH * HEIGHT);
-            if (key == KEY_F1 || key == KEY_ESCAPE) {
-                const enum desktop_action action = desktop_launcher(&keyboard, key == KEY_ESCAPE);
-                if (action == DESKTOP_EDITOR) {
-                    shell_clear_row(row);
-                    shell_edit(&row, (const unsigned char *)"ola.asm");
-                    desktop_restore_terminal();
-                    console_put(row * WIDTH, console_color | '>');
-                    for (unsigned int i = 0; i < length; ++i)
-                        console_put(row * WIDTH + PROMPT_WIDTH + i, console_color | line[i]);
-                } else {
-                    desktop_show_terminal();
-                }
-                continue;
-            }
+#else
+            const unsigned int key = shell_wait_key();
 #endif
             if (key == '\n')
                 break;

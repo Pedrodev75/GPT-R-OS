@@ -40,6 +40,9 @@ start:
     read_floppy 0,      0xe800, 12, 0x0101, 1
     read_floppy 0x1000, 0x0000,  6, 0x010d, 1
     read_floppy 0x1000, 0x0c00, 18, 0x0201, 0
+    read_floppy 0x1000, 0x3000, 18, 0x0201, 1
+    read_floppy 0x1000, 0x5400, 18, 0x0301, 0
+    read_floppy 0x1000, 0x7800, 18, 0x0301, 1
     jmp stage2
 read_hd:
     # Keep the BIOS-selected drive number across the EDD capability check.
@@ -86,7 +89,7 @@ disk_packet:
     .quad 1
 disk_packet_high:
     .byte 0x10, 0
-    .word 24
+    .word 78
     .word 0, 0x1000
     .quad 66
 

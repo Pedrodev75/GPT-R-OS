@@ -31,7 +31,12 @@ struct editor {
     const char *notice;
 };
 
-static unsigned char document[TEXT_LIMIT];
+static unsigned char document[TEXT_LIMIT], load_buffer[TEXT_LIMIT];
+static struct editor edit_state;
+static struct ata_disk current_disk;
+static struct fat16_volume current_volume;
+static unsigned char filename[13];
+static unsigned int filename_size, client_x, client_y;
 
 static unsigned int decode(const unsigned char *text, unsigned int available,
     unsigned int *codepoint)
@@ -75,7 +80,7 @@ static int load_chunk(void *context, const unsigned char *data, unsigned int siz
     if (size > sizeof(document) - edit->length)
         return 0;
     for (unsigned int i = 0; i < size; ++i)
-        document[edit->length++] = data[i];
+        load_buffer[edit->length++] = data[i];
     return 1;
 }
 
@@ -84,17 +89,17 @@ static int normalize_text(struct editor *edit)
     unsigned int output = 0;
     for (unsigned int i = 0; i < edit->length;) {
         unsigned int cp;
-        const unsigned int size = decode(document + i, edit->length - i, &cp);
+        const unsigned int size = decode(load_buffer + i, edit->length - i, &cp);
         if (!size || (cp < 32 && cp != '\r' && cp != '\n' && cp != '\t') || cp == 127)
             return 0;
         if (cp == '\r') {
-            document[output++] = '\n';
+            load_buffer[output++] = '\n';
             ++i;
-            if (i < edit->length && document[i] == '\n')
+            if (i < edit->length && load_buffer[i] == '\n')
                 ++i;
         } else {
             for (unsigned int j = 0; j < size; ++j)
-                document[output++] = document[i++];
+                load_buffer[output++] = load_buffer[i++];
         }
     }
     edit->length = output;
@@ -256,13 +261,13 @@ static void apply_key(struct editor *edit, unsigned int key)
 static void fill(unsigned int x, unsigned int y, unsigned int width,
     unsigned int height, unsigned int rgb)
 {
-    vga_graphics_fill(DESKTOP_EDITOR_CLIENT_X + x, DESKTOP_EDITOR_CLIENT_Y + y,
+    vga_graphics_fill(client_x + x, client_y + y,
         width, height, rgb);
 }
 
 static void glyph(unsigned int x, unsigned int y, unsigned char ch, unsigned int rgb)
 {
-    vga_graphics_overlay_glyph(DESKTOP_EDITOR_CLIENT_X + x, DESKTOP_EDITOR_CLIENT_Y + y, ch, rgb);
+    vga_graphics_overlay_glyph(client_x + x, client_y + y, ch, rgb);
 }
 
 static void label(unsigned int x, unsigned int y, const char *text, unsigned int rgb)
@@ -332,8 +337,8 @@ static void paint_row(unsigned int index, const struct editor_row *next, int for
         if (!glyph || glyph == ' ') {
             fill(x, y, CELL, ROW_HEIGHT, background);
         } else {
-            vga_graphics_overlay_cell(DESKTOP_EDITOR_CLIENT_X + x,
-                DESKTOP_EDITOR_CLIENT_Y + y, glyph, next->ink, background);
+            vga_graphics_overlay_cell(client_x + x,
+                client_y + y, glyph, next->ink, background);
             fill(x, y + VGA_OVERLAY_GLYPH_HEIGHT, CELL,
                 ROW_HEIGHT - VGA_OVERLAY_GLYPH_HEIGHT, background);
         }
@@ -519,6 +524,46 @@ static int save_file(struct editor *edit, const struct fat16_volume *volume,
     return 0;
 }
 
+void shell_editor_draw(unsigned int x, unsigned int y, int full)
+{
+    client_x = x;
+    client_y = y;
+    if (full)
+        view.initialized = view.confirming = 0;
+    draw_editor(&edit_state, filename);
+}
+
+int shell_editor_key(unsigned int key)
+{
+    struct editor *edit = &edit_state;
+    if (edit->confirming) {
+        if (key == 'd' || key == 'D') {
+            filename_size = 0;
+            return 1;
+        }
+        if (key == KEY_ESCAPE) {
+            edit->confirming = 0;
+        } else if (key == KEY_SAVE || key == 's' || key == 'S') {
+            if (save_file(edit, &current_volume, filename, filename_size)) {
+                filename_size = 0;
+                return 1;
+            }
+            edit->confirming = 0;
+        }
+    } else if (key == KEY_ESCAPE) {
+        if (!edit->changed) {
+            filename_size = 0;
+            return 1;
+        }
+        edit->confirming = 1;
+    } else if (key == KEY_SAVE) {
+        save_file(edit, &current_volume, filename, filename_size);
+    } else {
+        apply_key(edit, key);
+    }
+    return 0;
+}
+
 void shell_edit(unsigned int *row, const unsigned char *argument)
 {
     const unsigned char *name = shell_skip_spaces(argument);
@@ -527,6 +572,16 @@ void shell_edit(unsigned int *row, const unsigned char *argument)
         ++name_size;
     if (!name_size || name_size > 12 || name[name_size]) {
         shell_print_line(row, "Uso: edit <arquivo>");
+        return;
+    }
+
+    if (filename_size && shell_equals(name, (const char *)filename)) {
+        desktop_open_editor(filename);
+        return;
+    }
+    if (filename_size && edit_state.changed) {
+        edit_state.notice = "Salve o documento atual primeiro";
+        desktop_open_editor(filename);
         return;
     }
 
@@ -556,34 +611,16 @@ void shell_edit(unsigned int *row, const unsigned char *argument)
         }
     }
 
-    view.initialized = view.confirming = 0;
-    desktop_begin_editor(name);
-    for (;;) {
-        vga_graphics_begin_frame();
-        draw_editor(&edit, name);
-        vga_graphics_end_frame();
-        const unsigned int key = shell_wait_key();
-        if (edit.confirming) {
-            if (key == 'd' || key == 'D')
-                break;
-            if (key == KEY_ESCAPE) {
-                edit.confirming = 0;
-            } else if (key == KEY_SAVE || key == 's' || key == 'S') {
-                if (save_file(&edit, &volume, name, name_size))
-                    break;
-                edit.confirming = 0;
-            }
-        } else if (key == KEY_ESCAPE) {
-            if (!edit.changed)
-                break;
-            edit.confirming = 1;
-        } else if (key == KEY_SAVE) {
-            save_file(&edit, &volume, name, name_size);
-        } else {
-            apply_key(&edit, key);
-        }
-    }
-    desktop_show_terminal();
+    for (unsigned int i = 0; i < edit.length; ++i)
+        document[i] = load_buffer[i];
+    for (unsigned int i = 0; i <= name_size; ++i)
+        filename[i] = name[i];
+    filename_size = name_size;
+    current_disk = disk;
+    current_volume = volume;
+    current_volume.disk = &current_disk;
+    edit_state = edit;
+    desktop_open_editor(filename);
 }
 
 #endif

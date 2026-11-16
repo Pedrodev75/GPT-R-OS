@@ -39,5 +39,6 @@
 
 irq_entry keyboard_irq_entry, keyboard_irq_handler, 1
 irq_entry timer_irq_entry, timer_irq_handler
+irq_entry mouse_irq_entry, mouse_irq_handler
 
 .section .note.GNU-stack,"",@progbits

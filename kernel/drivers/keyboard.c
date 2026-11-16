@@ -140,7 +140,7 @@ int keyboard_irq_init(void)
 void keyboard_irq_handler(unsigned long long cs)
 {
     const unsigned char status = read_port(0x64);
-    const enum scan_action action = (status & 1) ? receive_byte(status) : DROP_SCAN;
+    const enum scan_action action = (status & 0x21) == 1 ? receive_byte(status) : DROP_SCAN;
     write_port(0x20, 0x20);
     if (action == INTERRUPT_APP)
         app_interrupt(cs);
@@ -192,6 +192,8 @@ unsigned int keyboard_poll(struct keyboard_state *keyboard)
         }
         if (key == 0x3b)
             return KEY_F1;
+        if (key == 0x3c)
+            return KEY_SWITCH_WINDOW;
         if (key == 1) {
             keyboard->accent = 0;
             return KEY_ESCAPE;
@@ -207,6 +209,12 @@ unsigned int keyboard_poll(struct keyboard_state *keyboard)
                 keyboard->shifts |= mask;
             continue;
         }
+        if (code == 0x38) {
+            keyboard->alt_down = !released;
+            continue;
+        }
+        if (code == 0x0f && keyboard->alt_down && !released)
+            return KEY_SWITCH_WINDOW;
         if (code == 0x3a) {
             if (!released && !keyboard->caps_down)
                 keyboard->caps = !keyboard->caps;

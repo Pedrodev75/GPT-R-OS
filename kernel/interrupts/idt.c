@@ -21,12 +21,13 @@ _Static_assert(sizeof(struct idt_gate) == 16, "Invalid IDT gate size");
 _Static_assert(sizeof(struct idt_pointer) == 10, "Invalid IDTR operand size");
 
 enum {
-    BREAKPOINT_VECTOR = 3, EXCEPTION_COUNT = 32, KEYBOARD_VECTOR = 0x21, SYSCALL_VECTOR = 0x80,
+    BREAKPOINT_VECTOR = 3, EXCEPTION_COUNT = 32, KEYBOARD_VECTOR = 0x21, MOUSE_VECTOR = 0x2c, SYSCALL_VECTOR = 0x80,
     KERNEL_CODE_SELECTOR = 0x08, USER_INTERRUPT_GATE = 0xee
 };
 extern void (* const exception_entries[EXCEPTION_COUNT])(void);
 extern void timer_irq_entry(void);
 extern void keyboard_irq_entry(void);
+extern void mouse_irq_entry(void);
 extern void app_syscall_entry(void);
 static struct idt_gate idt[SYSCALL_VECTOR + 1] __attribute__((aligned(16)));
 
@@ -51,6 +52,7 @@ void idt_init(void)
     set_gate(KEYBOARD_VECTOR, keyboard_irq_entry);
     for (unsigned int i = KEYBOARD_VECTOR + 1; i < SYSCALL_VECTOR; ++i)
         idt[i] = (struct idt_gate){0};
+    set_gate(MOUSE_VECTOR, mouse_irq_entry);
     set_gate(SYSCALL_VECTOR, app_syscall_entry);
     idt[SYSCALL_VECTOR].attributes = USER_INTERRUPT_GATE;
 

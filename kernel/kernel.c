@@ -5,6 +5,7 @@
 #include "interrupts/idt.h"
 #include "drivers/timer.h"
 #include "drivers/keyboard.h"
+#include "drivers/mouse.h"
 #include "fs/fat16.h"
 #include "shell/shell.h"
 
@@ -168,10 +169,16 @@ void kernel_main(void)
     app_init();
     timer_init();
     const int keyboard_ok = keyboard_irq_init();
+#ifdef GPT_R_GRAPHICS
+    const int mouse_ok = mouse_init();
+#endif
     __asm__ volatile ("sti" : : : "memory");
 
     boot_log(&row, timer_responds() ? BOOT_OK : BOOT_FAILED, "Timer PIT");
     boot_log(&row, keyboard_ok ? BOOT_OK : BOOT_FAILED, "Teclado PS/2 - IRQ1");
+#ifdef GPT_R_GRAPHICS
+    boot_log(&row, mouse_ok ? BOOT_OK : BOOT_FAILED, "Mouse PS/2 - IRQ12");
+#endif
     log_storage(&row);
     shell_run(row + 1);
 }

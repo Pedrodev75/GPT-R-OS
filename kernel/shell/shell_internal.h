@@ -45,6 +45,8 @@ int shell_find_file(unsigned int *row, const struct fat16_volume *volume,
 void shell_report_file_edit(unsigned int *row, enum fat16_edit_result result,
     const char *success);
 void shell_edit(unsigned int *row, const unsigned char *argument);
+void shell_editor_draw(unsigned int x, unsigned int y, int full);
+int shell_editor_key(unsigned int key);
 void shell_assemble(unsigned int *row, const unsigned char *argument);
 void shell_appinfo(unsigned int *row, const unsigned char *argument);
 void shell_cat(unsigned int *row, const unsigned char *argument);

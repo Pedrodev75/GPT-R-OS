@@ -25,6 +25,11 @@ void vga_graphics_begin_overlay(void);
 /* The first frame must paint the whole screen. Later frames may paint parts. */
 void vga_graphics_begin_frame(void);
 void vga_graphics_end_frame(void);
+void vga_graphics_clip(unsigned int x, unsigned int y, unsigned int width, unsigned int height);
+void vga_graphics_mouse_cursor(unsigned int x, unsigned int y, int visible);
+/* A zero-sized rectangle removes the drag preview. */
+void vga_graphics_drag_outline(unsigned int x, unsigned int y,
+    unsigned int width, unsigned int height);
 void vga_graphics_place_console(unsigned int x, unsigned int y);
 void vga_graphics_snapshot_console(void);
 void vga_graphics_resume_console(void);
