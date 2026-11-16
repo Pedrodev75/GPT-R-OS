@@ -16,13 +16,18 @@ enum {
 void vga_graphics_init(void);
 void vga_graphics_put(unsigned int cell, unsigned short value);
 unsigned short vga_graphics_get(unsigned int cell);
+void vga_graphics_scroll(unsigned int first_row, unsigned short blank);
 void vga_graphics_cursor(unsigned int cell);
 void vga_graphics_blink(void);
 struct keyboard_state;
 void vga_graphics_demo(struct keyboard_state* keyboard);
 void vga_graphics_begin_overlay(void);
+/* The first frame must paint the whole screen. Later frames may paint parts. */
+void vga_graphics_begin_frame(void);
+void vga_graphics_end_frame(void);
 void vga_graphics_place_console(unsigned int x, unsigned int y);
 void vga_graphics_snapshot_console(void);
+void vga_graphics_resume_console(void);
 void vga_graphics_fill(unsigned int x, unsigned int y, unsigned int width,
     unsigned int height, unsigned int rgb);
 void vga_graphics_overlay_glyph(unsigned int x, unsigned int y,

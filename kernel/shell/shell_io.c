@@ -12,9 +12,13 @@ void shell_next_row(unsigned int *row)
         ++*row;
         return;
     }
+#ifdef GPT_R_GRAPHICS
+    vga_graphics_scroll(FIRST_ROW, console_color | ' ');
+#else
     for (unsigned int i = FIRST_ROW * WIDTH; i < (HEIGHT - 1) * WIDTH; ++i)
         console_put(i, console_get(i + WIDTH));
     shell_clear_row(*row);
+#endif
 }
 
 void shell_print_line(unsigned int *row, const char *text)

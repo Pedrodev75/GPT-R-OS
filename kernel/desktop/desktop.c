@@ -120,12 +120,8 @@ static void draw_taskbar(int editor_active, int menu_open)
         text(SCREEN_WIDTH - 171, top + 8, "Esc Fecha", MUTED);
 }
 
-static void draw_menu(enum desktop_action choice)
+static void draw_menu_items(enum desktop_action choice)
 {
-    vga_graphics_fill(MENU_X + 6, MENU_Y + 6, MENU_WIDTH, MENU_HEIGHT, SHADOW);
-    vga_graphics_fill(MENU_X, MENU_Y, MENU_WIDTH, MENU_HEIGHT, BORDER);
-    vga_graphics_fill(MENU_X + 1, MENU_Y + 1, MENU_WIDTH - 2, MENU_HEIGHT - 2, PANEL);
-    text(MENU_X + 15, MENU_Y + 14, "Aplicativos", ACCENT);
     for (unsigned int item = 0; item < 2; ++item) {
         const unsigned int y = MENU_Y + 47 + item * 40;
         const int selected = item == (unsigned int)choice;
@@ -139,21 +135,28 @@ static void draw_menu(enum desktop_action choice)
             editor_icon(MENU_X + 22, y + 9, selected ? ACCENT : MUTED);
         text(MENU_X + 60, y + 6, item == DESKTOP_TERMINAL ? "Terminal" : "Editor", INK);
     }
+}
+
+static void draw_menu(enum desktop_action choice)
+{
+    vga_graphics_fill(MENU_X + 6, MENU_Y + 6, MENU_WIDTH, MENU_HEIGHT, SHADOW);
+    vga_graphics_fill(MENU_X, MENU_Y, MENU_WIDTH, MENU_HEIGHT, BORDER);
+    vga_graphics_fill(MENU_X + 1, MENU_Y + 1, MENU_WIDTH - 2, MENU_HEIGHT - 2, PANEL);
+    text(MENU_X + 15, MENU_Y + 14, "Aplicativos", ACCENT);
+    draw_menu_items(choice);
     text(MENU_X + 16, MENU_Y + 139, "Setas / Enter", MUTED);
 }
 
 static void paint_desktop(int editor_active, const unsigned char *filename, int menu_open)
 {
     vga_graphics_begin_overlay();
+    vga_graphics_begin_frame();
     desktop_background();
     terminal_focused = terminal_open && !editor_active && !menu_open;
     if (terminal_open) {
         draw_window(&terminal, terminal_focused, 0);
         vga_graphics_place_console(terminal.x + DESKTOP_FRAME, terminal.y + DESKTOP_TITLE_HEIGHT);
-        if (editor_active || menu_open)
-            vga_graphics_snapshot_console();
-        else
-            vga_graphics_restore_console();
+        vga_graphics_snapshot_console();
     }
     if (editor_active)
         draw_window(&editor, 1, filename);
@@ -164,6 +167,8 @@ void desktop_show_terminal(void)
 {
     terminal_open = 1;
     paint_desktop(0, 0, 0);
+    vga_graphics_end_frame();
+    vga_graphics_resume_console();
 }
 
 void desktop_restore_terminal(void)
@@ -172,7 +177,7 @@ void desktop_restore_terminal(void)
         desktop_show_terminal();
 }
 
-void desktop_show_editor(const unsigned char *name)
+void desktop_begin_editor(const unsigned char *name)
 {
     paint_desktop(1, name, 0);
 }
@@ -186,6 +191,7 @@ enum desktop_action desktop_launcher(struct keyboard_state *keyboard, int close_
     paint_desktop(0, 0, menu_open);
     if (menu_open)
         draw_menu(choice);
+    vga_graphics_end_frame();
 
     for (;;) {
         const unsigned int key = keyboard_wait(keyboard);
@@ -196,9 +202,12 @@ enum desktop_action desktop_launcher(struct keyboard_state *keyboard, int close_
             paint_desktop(0, 0, menu_open);
             if (menu_open)
                 draw_menu(choice);
+            vga_graphics_end_frame();
         } else if (menu_open && (key == KEY_UP || key == KEY_DOWN)) {
             choice = choice == DESKTOP_EDITOR ? DESKTOP_TERMINAL : DESKTOP_EDITOR;
-            draw_menu(choice);
+            vga_graphics_begin_frame();
+            draw_menu_items(choice);
+            vga_graphics_end_frame();
         } else if (menu_open && key == '\n') {
             return choice;
         }

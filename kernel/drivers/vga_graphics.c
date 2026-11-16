@@ -1,6 +1,7 @@
 #include "console.h"
 #include "keyboard.h"
 #include "timer.h"
+#include "../memory/pages.h"
 
 enum {
     WIDTH = VGA_GRAPHICS_WIDTH,
@@ -10,6 +11,51 @@ enum {
 static volatile unsigned char* video;
 static unsigned int pitch;
 static unsigned int palette[256];
+
+/* A 1024-pixel RGB row fits in one page. Pages may be physically scattered. */
+_Static_assert(WIDTH * sizeof(unsigned int) <= PAGE_SIZE, "Framebuffer row exceeds one page");
+static struct frame_row {
+    unsigned int *pixels;
+    unsigned short left, right;
+} frame_rows[HEIGHT];
+static int frame_storage, frame_active;
+
+static int allocate_frame(void)
+{
+    unsigned int row = 0;
+    for (; row < HEIGHT; ++row) {
+        frame_rows[row].pixels = page_alloc();
+        if (!frame_rows[row].pixels) {
+            while (row)
+                page_free(frame_rows[--row].pixels);
+            return -1;
+        }
+    }
+    return 1;
+}
+
+void vga_graphics_begin_frame(void)
+{
+    if (frame_active)
+        return;
+    if (!frame_storage)
+        frame_storage = allocate_frame();
+    if (frame_storage < 0)
+        return;
+    for (unsigned int row = 0; row < HEIGHT; ++row) {
+        frame_rows[row].left = WIDTH;
+        frame_rows[row].right = 0;
+    }
+    frame_active = 1;
+}
+
+static void mark_span(struct frame_row *row, unsigned int left, unsigned int right)
+{
+    if (left < row->left)
+        row->left = left;
+    if (right > row->right)
+        row->right = right;
+}
 
 static void init_palette(void)
 {
@@ -37,6 +83,21 @@ static void put_pixel(volatile unsigned char* pixel, unsigned int rgb)
     pixel[1] = rgb >> 8;
     pixel[2] = rgb >> 16;
 }
+void vga_graphics_end_frame(void)
+{
+    if (!frame_active)
+        return;
+    for (unsigned int y = 0; y < HEIGHT; ++y) {
+        const struct frame_row *row = &frame_rows[y];
+        if (row->left >= row->right)
+            continue;
+        volatile unsigned char *pixel = video + y * pitch + row->left * 3;
+        for (unsigned int x = row->left; x < row->right; ++x, pixel += 3)
+            put_pixel(pixel, row->pixels[x]);
+    }
+    frame_active = 0;
+}
+
 /* boot.S copies the BIOS 8x8 font here before entering long mode. */
 static const unsigned char* const font = (const unsigned char*)0x6000;
 
@@ -50,10 +111,18 @@ void vga_graphics_fill(unsigned int x, unsigned int y, unsigned int width,
     if (height > HEIGHT - y)
         height = HEIGHT - y;
 
-    for (unsigned int row = 0; row < height; ++row) {
-        volatile unsigned char* pixel = video + (y + row) * pitch + x * 3;
-        for (unsigned int col = 0; col < width; ++col, pixel += 3)
-            put_pixel(pixel, rgb);
+    for (unsigned int line = y; line < y + height; ++line) {
+        struct frame_row *row = &frame_rows[line];
+        if (frame_storage > 0)
+            for (unsigned int col = x; col < x + width; ++col)
+                row->pixels[col] = rgb;
+        if (frame_active) {
+            mark_span(row, x, x + width);
+        } else {
+            volatile unsigned char *pixel = video + line * pitch + x * 3;
+            for (unsigned int col = 0; col < width; ++col, pixel += 3)
+                put_pixel(pixel, rgb);
+        }
     }
 }
 
@@ -204,13 +273,19 @@ static void overlay_glyph(unsigned int x, unsigned int y,
     for (unsigned int row = 0; row < VGA_OVERLAY_GLYPH_HEIGHT; ++row) {
         const unsigned int source_y = row / VGA_GLYPH_SCALE;
         const unsigned char bits = glyph_row(glyph, source_y);
+        struct frame_row *line = &frame_rows[y + row];
         volatile unsigned char *pixels = video + (y + row) * pitch + x * 3;
         for (unsigned int col = 0; col < VGA_OVERLAY_CELL_WIDTH; ++col) {
             const unsigned int source_x = col / VGA_GLYPH_SCALE;
-            if (bits & (0x80 >> source_x))
-                put_pixel(pixels + col * 3, rgb);
-            else if (background <= 0xffffff)
-                put_pixel(pixels + col * 3, background);
+            const unsigned int color = bits & (0x80 >> source_x) ? rgb : background;
+            if (color > 0xffffff)
+                continue;
+            if (frame_storage > 0)
+                line->pixels[x + col] = color;
+            if (frame_active)
+                mark_span(line, x + col, x + col + 1);
+            else
+                put_pixel(pixels + col * 3, color);
         }
     }
 }
@@ -299,6 +374,7 @@ void vga_graphics_init(void)
     pitch = *(const volatile unsigned short*)0x6410;
     video = (volatile unsigned char*)(0x100000000ull + (physical & 0x1fffff));
     init_palette();
+    frame_storage = frame_active = 0;
     console_x = console_y = 0;
     cursor_slot = 0;
     cursor_visible = 0;
@@ -321,13 +397,8 @@ void vga_graphics_place_console(unsigned int x, unsigned int y)
     }
 }
 
-static void present_console(int resume)
+static void paint_timer_row(int resume)
 {
-    /* The timer can update the second row while the overlay owns the screen. */
-    for (unsigned int cell = 0; cell < CELL_COUNT; ++cell)
-        if (cell / COLUMNS != 1)
-            render_cell(cell, cells[cell]);
-
     unsigned long long flags;
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
     for (unsigned int cell = COLUMNS; cell < 2 * COLUMNS; ++cell)
@@ -340,13 +411,47 @@ static void present_console(int resume)
 
 void vga_graphics_snapshot_console(void)
 {
-    present_console(0);
+    /* Only the timer row can change while an overlay owns the screen. */
+    for (unsigned int cell = 0; cell < CELL_COUNT; ++cell)
+        if (cell / COLUMNS != 1)
+            render_cell(cell, cells[cell]);
+    paint_timer_row(0);
+}
+
+void vga_graphics_resume_console(void)
+{
+    /* The timer can tick between composing and presenting a frame. */
+    paint_timer_row(1);
+}
+
+void vga_graphics_scroll(unsigned int first_row, unsigned short blank)
+{
+    const int visible = !overlay_active;
+    if (visible) {
+        vga_graphics_begin_overlay();
+        vga_graphics_begin_frame();
+    }
+    for (unsigned int cell = first_row * COLUMNS; cell < CELL_COUNT; ++cell) {
+        const unsigned short next = cell + COLUMNS < CELL_COUNT ? cells[cell + COLUMNS] : blank;
+        if (cells[cell] != next) {
+            cells[cell] = next;
+            if (visible)
+                render_cell(cell, next);
+        }
+    }
+    if (visible) {
+        vga_graphics_end_frame();
+        vga_graphics_resume_console();
+    }
 }
 
 void vga_graphics_restore_console(void)
 {
-    if (overlay_active)
-        present_console(1);
+    if (overlay_active) {
+        vga_graphics_end_frame();
+        vga_graphics_snapshot_console();
+        vga_graphics_resume_console();
+    }
 }
 
 void vga_graphics_demo(struct keyboard_state* keyboard)
@@ -359,12 +464,14 @@ void vga_graphics_demo(struct keyboard_state* keyboard)
     unsigned int last = timer_ticks();
 
     vga_graphics_begin_overlay();
+    vga_graphics_begin_frame();
     rect(0, 0, WIDTH, HEIGHT, 0);
     draw_text(24, 20, "GPT-R OS / DEMO", 15);
     for (unsigned int i = 0; i < 256; ++i)
         rect((WIDTH - 512) / 2 + i * 2, 64, 2, 28, i);
     draw_text(24, HEIGHT - 29, "Setas: mover   Esc: voltar", 15);
     rect(x, y, SQUARE, SQUARE, colors[color]);
+    vga_graphics_end_frame();
 
     for (;;) {
         const unsigned int key = keyboard_poll(keyboard);

@@ -557,9 +557,11 @@ void shell_edit(unsigned int *row, const unsigned char *argument)
     }
 
     view.initialized = view.confirming = 0;
-    desktop_show_editor(name);
+    desktop_begin_editor(name);
     for (;;) {
+        vga_graphics_begin_frame();
         draw_editor(&edit, name);
+        vga_graphics_end_frame();
         const unsigned int key = shell_wait_key();
         if (edit.confirming) {
             if (key == 'd' || key == 'D')

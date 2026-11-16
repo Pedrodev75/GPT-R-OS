@@ -18,7 +18,8 @@ enum desktop_action { DESKTOP_TERMINAL, DESKTOP_EDITOR };
 struct keyboard_state;
 void desktop_show_terminal(void);
 void desktop_restore_terminal(void);
-void desktop_show_editor(const unsigned char *name);
+/* The editor presents this frame after drawing its first contents. */
+void desktop_begin_editor(const unsigned char *name);
 enum desktop_action desktop_launcher(struct keyboard_state *keyboard, int close_terminal);
 #endif
 
