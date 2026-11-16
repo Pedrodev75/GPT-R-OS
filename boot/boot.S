@@ -97,6 +97,13 @@ disk_packet_high:
 .word 0xaa55
 
 .section .stage2,"ax"
+.ifdef GPT_R_GRAPHICS
+.equ VBE_MODE, 0x0118
+.equ VBE_WIDTH, 1024
+.equ VBE_HEIGHT, 768
+.equ VBE_MAX_PITCH, 4096
+.equ FRAMEBUFFER_LARGE_PAGES, 3
+.endif
 stage2:
     call collect_e820
 .ifdef GPT_R_GRAPHICS
@@ -122,7 +129,7 @@ stage2:
     rep stosw
     mov di, 0x6400
     mov ax, 0x4f01
-    mov cx, 0x0112
+    mov cx, VBE_MODE
     push ds
     int 0x10
     pop ds
@@ -132,9 +139,9 @@ stage2:
     and ax, 0x0091
     cmp ax, 0x0091
     jne vbe_error
-    cmp word ptr [0x6412], 640
+    cmp word ptr [0x6412], VBE_WIDTH
     jne vbe_error
-    cmp word ptr [0x6414], 480
+    cmp word ptr [0x6414], VBE_HEIGHT
     jne vbe_error
     cmp byte ptr [0x6419], 24
     jne vbe_error
@@ -157,15 +164,15 @@ stage2:
     jne vbe_error
     cmp word ptr [si + 4], 0x0008
     jne vbe_error
-    cmp word ptr [0x6410], 1920
+    cmp word ptr [0x6410], VBE_WIDTH * 3
     jb vbe_error
-    cmp word ptr [0x6410], 4096
+    cmp word ptr [0x6410], VBE_MAX_PITCH
     ja vbe_error
     cmp dword ptr [0x6428], 0x40000000
     jb vbe_error
 
     mov ax, 0x4f02
-    mov bx, 0x4112
+    mov bx, VBE_MODE | 0x4000
     int 0x10
     cmp ax, 0x004f
     jne vbe_error
@@ -194,12 +201,17 @@ stage2:
     mov eax, dword ptr [0x6428]
     and eax, 0xffe00000
     or eax, 0x9b  # Present, writable, uncached 2 MiB page.
-    mov dword ptr [0x4000], eax
+    # At most 3 MiB of pixels plus the physical base's offset in its first page.
     xor edx, edx
+    mov di, 0x4000
+    mov cx, FRAMEBUFFER_LARGE_PAGES
+.map_framebuffer:
+    mov dword ptr [di], eax
+    mov dword ptr [di + 4], edx
     add eax, 0x200000
     adc edx, 0
-    mov dword ptr [0x4008], eax
-    mov dword ptr [0x400c], edx
+    add di, 8
+    loop .map_framebuffer
 .endif
 
     lgdt [gdtr]
@@ -239,7 +251,7 @@ vbe_error:
     hlt
     jmp .vbe_stop
 vbe_error_message:
-    .asciz "GPT-R OS: modo VBE 640x480 indisponivel"
+    .asciz "GPT-R OS: modo VBE 1024x768 indisponivel"
 .endif
 
 # Handoff at physical 0x5000: count (u16), status (u16), then

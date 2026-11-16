@@ -5,9 +5,20 @@
 
 enum {
     TEXT_LIMIT = 4096,
-    VIEW_X = 61, VIEW_Y = 51, ROW_HEIGHT = 17, VIEW_ROWS = 22, VIEW_COLS = 55,
-    CELL = VGA_OVERLAY_CELL_WIDTH, FOOTER_Y = 429, ROW_RIGHT = 620,
-    DIALOG_TOP = 161, DIALOG_HEIGHT = 112,
+    CELL = VGA_OVERLAY_CELL_WIDTH, ROW_HEIGHT = VGA_LINE_HEIGHT,
+    HEADER_HEIGHT = 54, FOOTER_Y = VGA_GRAPHICS_HEIGHT - 62,
+    VIEW_X = 92, VIEW_Y = HEADER_HEIGHT + 8,
+    ROW_RIGHT = VGA_GRAPHICS_WIDTH - 22, SCROLL_X = VGA_GRAPHICS_WIDTH - 11,
+    VIEW_ROWS = (FOOTER_Y - VIEW_Y) / ROW_HEIGHT,
+    VIEW_COLS = (ROW_RIGHT - VIEW_X) / CELL,
+    LINE_NUMBER_RIGHT = VIEW_X - 16, LINE_NUMBER_WIDTH = 4 * CELL,
+    HEADER_TEXT_Y = (HEADER_HEIGHT - VGA_OVERLAY_GLYPH_HEIGHT) / 2,
+    BADGE_WIDTH = 138, BADGE_X = VGA_GRAPHICS_WIDTH - BADGE_WIDTH - 16,
+    STATUS_Y = FOOTER_Y + 7, SHORTCUTS_Y = FOOTER_Y + 33,
+    COLUMN_RIGHT = 270, NOTICE_X = 290, ENCODING_X = VGA_GRAPHICS_WIDTH - 100,
+    DIALOG_WIDTH = 560, DIALOG_HEIGHT = 140,
+    DIALOG_LEFT = (VGA_GRAPHICS_WIDTH - DIALOG_WIDTH) / 2,
+    DIALOG_TOP = (VGA_GRAPHICS_HEIGHT - DIALOG_HEIGHT) / 2,
     BACKGROUND = 0x0b1423, PANEL = 0x142338, ACTIVE = 0x1a2c45,
     BORDER = 0x2e415c, LABEL = 0x9bacc4, TEXT = 0xe7eef8, ACCENT = 0x61dcf5,
     MUTED = 0x8095ac, UNSAVED = 0xffcb82
@@ -292,9 +303,10 @@ static void paint_row(unsigned int index, const struct editor_row *next, int for
     }
     if (repaint_background || next->number != old->number) {
         if (!repaint_background)
-            vga_graphics_fill(4, y, 40, ROW_HEIGHT, gutter);
+            vga_graphics_fill(LINE_NUMBER_RIGHT - LINE_NUMBER_WIDTH, y,
+                LINE_NUMBER_WIDTH, ROW_HEIGHT, gutter);
         if (next->number)
-            right_number(44, y, next->number, next->active ? ACCENT : MUTED);
+            right_number(LINE_NUMBER_RIGHT, y, next->number, next->active ? ACCENT : MUTED);
     }
     for (unsigned int col = 0; col < VIEW_COLS; ++col) {
         const unsigned char glyph = next->glyphs[col];
@@ -365,9 +377,9 @@ static void draw_scrollbar(unsigned int top, unsigned int lines)
         y += (height - thumb) * top / (lines - VIEW_ROWS);
     }
     if (!view.initialized || y != view.scroll_y || thumb != view.scroll_size) {
-        vga_graphics_fill(629, VIEW_Y, 3, height, thumb ? BORDER : BACKGROUND);
+        vga_graphics_fill(SCROLL_X, VIEW_Y, 3, height, thumb ? BORDER : BACKGROUND);
         if (thumb)
-            vga_graphics_fill(629, y, 3, thumb, MUTED);
+            vga_graphics_fill(SCROLL_X, y, 3, thumb, MUTED);
         view.scroll_y = y;
         view.scroll_size = thumb;
     }
@@ -376,42 +388,45 @@ static void draw_scrollbar(unsigned int top, unsigned int lines)
 static void draw_frame(const unsigned char *name)
 {
     vga_graphics_fill(0, 0, VGA_GRAPHICS_WIDTH, VGA_GRAPHICS_HEIGHT, BACKGROUND);
-    vga_graphics_fill(0, 0, VGA_GRAPHICS_WIDTH, 46, PANEL);
-    vga_graphics_fill(0, 45, VGA_GRAPHICS_WIDTH, 1, BORDER);
-    vga_graphics_fill(0, 0, 4, 46, ACCENT);
-    label(16, 14, "EDITOR", LABEL);
-    label(96, 14, (const char *)name, TEXT);
+    vga_graphics_fill(0, 0, VGA_GRAPHICS_WIDTH, HEADER_HEIGHT, PANEL);
+    vga_graphics_fill(0, HEADER_HEIGHT - 1, VGA_GRAPHICS_WIDTH, 1, BORDER);
+    vga_graphics_fill(0, 0, 4, HEADER_HEIGHT, ACCENT);
+    label(16, HEADER_TEXT_Y, "EDITOR", LABEL);
+    label(132, HEADER_TEXT_Y, (const char *)name, TEXT);
     vga_graphics_fill(0, FOOTER_Y, VGA_GRAPHICS_WIDTH, VGA_GRAPHICS_HEIGHT - FOOTER_Y, PANEL);
     vga_graphics_fill(0, FOOTER_Y, VGA_GRAPHICS_WIDTH, 1, BORDER);
-    label(13, 436, "Ln", LABEL);
-    label(101, 436, "Col", LABEL);
-    label(568, 436, "UTF-8", MUTED);
-    label(13, 459, "Ctrl+S Salvar    Esc Sair    Setas Mover", LABEL);
+    label(16, STATUS_Y, "Ln", LABEL);
+    label(132, STATUS_Y, "Col", LABEL);
+    label(ENCODING_X, STATUS_Y, "UTF-8", MUTED);
+    label(16, SHORTCUTS_Y, "Ctrl+S Salvar    Esc Sair    Setas Mover", LABEL);
 }
 
 static void draw_status(const struct editor *edit, unsigned int line, unsigned int col)
 {
     const int status = edit->changed ? 2 : edit->exists ? 1 : 0;
     if (!view.initialized || status != view.status) {
-        vga_graphics_fill(532, 10, 94, 25, ACTIVE);
-        label(543, 14, status == 2 ? "EDITADO" : status == 1 ? "SALVO" : "NOVO",
-            status == 2 ? UNSAVED : ACCENT);
+        vga_graphics_fill(BADGE_X, 12, BADGE_WIDTH, 30, ACTIVE);
+        label(BADGE_X + 12, HEADER_TEXT_Y, status == 2 ? "EDITADO" :
+            status == 1 ? "SALVO" : "NOVO", status == 2 ? UNSAVED : ACCENT);
         view.status = status;
     }
     if (!view.initialized || line != view.line) {
-        vga_graphics_fill(45, 436, 40, VGA_OVERLAY_GLYPH_HEIGHT, PANEL);
-        right_number(85, 436, line + 1, TEXT);
+        const unsigned int right = 116;
+        vga_graphics_fill(right - 4 * CELL, STATUS_Y, 4 * CELL, VGA_OVERLAY_GLYPH_HEIGHT, PANEL);
+        right_number(right, STATUS_Y, line + 1, TEXT);
         view.line = line;
     }
     if (!view.initialized || col != view.column) {
-        vga_graphics_fill(130, 436, 50, VGA_OVERLAY_GLYPH_HEIGHT, PANEL);
-        right_number(180, 436, col + 1, TEXT);
+        vga_graphics_fill(COLUMN_RIGHT - 5 * CELL, STATUS_Y, 5 * CELL,
+            VGA_OVERLAY_GLYPH_HEIGHT, PANEL);
+        right_number(COLUMN_RIGHT, STATUS_Y, col + 1, TEXT);
         view.column = col;
     }
     if (!view.initialized || edit->notice != view.notice) {
-        vga_graphics_fill(204, 436, 350, VGA_OVERLAY_GLYPH_HEIGHT, PANEL);
+        vga_graphics_fill(NOTICE_X, STATUS_Y, ENCODING_X - NOTICE_X - 8,
+            VGA_OVERLAY_GLYPH_HEIGHT, PANEL);
         if (edit->notice)
-            label(204, 436, edit->notice, UNSAVED);
+            label(NOTICE_X, STATUS_Y, edit->notice, UNSAVED);
         view.notice = edit->notice;
     }
 }
@@ -449,12 +464,13 @@ static void draw_editor(struct editor *edit, const unsigned char *name)
     draw_status(edit, line, col);
 
     if (edit->confirming && !view.confirming) {
-        vga_graphics_fill(106, DIALOG_TOP, 428, DIALOG_HEIGHT, BORDER);
-        vga_graphics_fill(108, DIALOG_TOP + 2, 424, DIALOG_HEIGHT - 4, PANEL);
-        vga_graphics_fill(108, DIALOG_TOP + 2, 424, 3, UNSAVED);
-        label(126, 181, "Alteracoes sem salvar", UNSAVED);
-        label(126, 211, "S Salvar e sair    D Descartar", TEXT);
-        label(126, 238, "Esc Continuar editando", LABEL);
+        const unsigned int text_x = DIALOG_LEFT + 24;
+        vga_graphics_fill(DIALOG_LEFT, DIALOG_TOP, DIALOG_WIDTH, DIALOG_HEIGHT, BORDER);
+        vga_graphics_fill(DIALOG_LEFT + 2, DIALOG_TOP + 2, DIALOG_WIDTH - 4, DIALOG_HEIGHT - 4, PANEL);
+        vga_graphics_fill(DIALOG_LEFT + 2, DIALOG_TOP + 2, DIALOG_WIDTH - 4, 3, UNSAVED);
+        label(text_x, DIALOG_TOP + 20, "Alteracoes sem salvar", UNSAVED);
+        label(text_x, DIALOG_TOP + 59, "S Salvar e sair    D Descartar", TEXT);
+        label(text_x, DIALOG_TOP + 100, "Esc Continuar editando", LABEL);
     }
     view.confirming = edit->confirming;
     view.initialized = 1;

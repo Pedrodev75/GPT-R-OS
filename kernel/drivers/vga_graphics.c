@@ -63,16 +63,11 @@ static void rect(unsigned int x, unsigned int y, unsigned int width,
     vga_graphics_fill(x, y, width, height, palette[color]);
 }
 
-static void draw_text(unsigned int x, unsigned int y, const char* text,
-    unsigned int scale, unsigned char color)
+static void draw_text(unsigned int x, unsigned int y, const char *text, unsigned char color)
 {
     while (*text) {
-        const unsigned char* glyph = font + ((unsigned char)*text++ & 0x7f) * GLYPH_SIZE;
-        for (unsigned int row = 0; row < GLYPH_SIZE; ++row)
-            for (unsigned int col = 0; col < GLYPH_SIZE; ++col)
-                if (glyph[row] & (0x80 >> col))
-                    rect(x + col * scale, y + row * scale, scale, scale, color);
-        x += GLYPH_SIZE * scale;
+        vga_graphics_overlay_glyph(x, y, (unsigned char)*text++, palette[color]);
+        x += VGA_OVERLAY_CELL_WIDTH;
     }
 }
 
@@ -162,8 +157,6 @@ static unsigned char letter_row(unsigned char ch, unsigned int row)
     return terminal_font[ch - '0'][row] << 2;
 }
 
-enum { ACCENT_ROWS = 2, GLYPH_HEIGHT = ACCENT_ROWS + GLYPH_SIZE };
-
 static unsigned char glyph_row(unsigned char ch, unsigned int row)
 {
     static const unsigned char accents[][2] = {
@@ -171,7 +164,7 @@ static unsigned char glyph_row(unsigned char ch, unsigned int row)
     };
     static const char vowels[] = "aeiouAEIOU";
 
-    if (row < ACCENT_ROWS) {
+    if (row < VGA_ACCENT_ROWS) {
         if (ch >= 0x82 && ch < 0xaa)
             return accents[(ch - 0x82) / 10][row];
         if (ch >= 0xf0 && ch <= 0xf3)
@@ -179,7 +172,7 @@ static unsigned char glyph_row(unsigned char ch, unsigned int row)
         return 0;
     }
 
-    row -= ACCENT_ROWS;
+    row -= VGA_ACCENT_ROWS;
     if (ch >= 0xf0 && ch <= 0xf3)
         return 0;
     if (ch == 0x80 || ch == 0x81) {
@@ -199,7 +192,7 @@ static unsigned char glyph_row(unsigned char ch, unsigned int row)
     if ((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') ||
         (ch >= 'a' && ch <= 'z'))
         return letter_row(ch, row);
-    return font[(ch < 128 ? ch : '?') * 8 + row];
+    return font[(ch < 128 ? ch : '?') * GLYPH_SIZE + row];
 }
 
 static void overlay_glyph(unsigned int x, unsigned int y,
@@ -208,13 +201,11 @@ static void overlay_glyph(unsigned int x, unsigned int y,
     if (x > WIDTH - VGA_OVERLAY_CELL_WIDTH || y > HEIGHT - VGA_OVERLAY_GLYPH_HEIGHT)
         return;
     for (unsigned int row = 0; row < VGA_OVERLAY_GLYPH_HEIGHT; ++row) {
-        const unsigned int source_y = (2 * row + 1) * GLYPH_HEIGHT /
-            (2 * VGA_OVERLAY_GLYPH_HEIGHT);
+        const unsigned int source_y = row / VGA_GLYPH_SCALE;
         const unsigned char bits = glyph_row(glyph, source_y);
         volatile unsigned char *pixels = video + (y + row) * pitch + x * 3;
         for (unsigned int col = 0; col < VGA_OVERLAY_CELL_WIDTH; ++col) {
-            const unsigned int source_x = (2 * col + 1) * GLYPH_SIZE /
-                (2 * VGA_OVERLAY_CELL_WIDTH);
+            const unsigned int source_x = col / VGA_GLYPH_SCALE;
             if (bits & (0x80 >> source_x))
                 put_pixel(pixels + col * 3, rgb);
             else if (background <= 0xffffff)
@@ -235,28 +226,15 @@ void vga_graphics_overlay_cell(unsigned int x, unsigned int y,
     overlay_glyph(x, y, glyph, foreground, background);
 }
 
-enum { DISPLAY_GLYPH_HEIGHT = VGA_LINE_HEIGHT - 1 };
-
 static void render_cell(unsigned int cell, unsigned short value)
 {
     const unsigned int foreground = palette[(value >> 8) & 15];
     const unsigned int background = palette[(value >> 12) & 7];
-    const unsigned int x0 = (cell % COLUMNS) * VGA_CELL_WIDTH;
-    const unsigned int y0 = (cell / COLUMNS) * VGA_LINE_HEIGHT;
-    volatile unsigned char* line = video + y0 * pitch + x0 * 3;
-
-    /* Sample the original bitmap at the center of each destination pixel. */
-    for (unsigned int y = 0; y < DISPLAY_GLYPH_HEIGHT; ++y, line += pitch) {
-        const unsigned int source_y = (2 * y + 1) * GLYPH_HEIGHT / (2 * DISPLAY_GLYPH_HEIGHT);
-        const unsigned char bits = glyph_row(value, source_y);
-        for (unsigned int x = 0; x < VGA_CELL_WIDTH; ++x) {
-            const unsigned int source_x = (2 * x + 1) * GLYPH_SIZE / (2 * VGA_CELL_WIDTH);
-            const unsigned int rgb = (bits & (0x80 >> source_x)) ? foreground : background;
-            put_pixel(line + x * 3, rgb);
-        }
-    }
-    for (unsigned int x = 0; x < VGA_CELL_WIDTH; ++x)
-        put_pixel(line + x * 3, background);
+    const unsigned int x = (cell % COLUMNS) * VGA_CELL_WIDTH;
+    const unsigned int y = (cell / COLUMNS) * VGA_LINE_HEIGHT;
+    overlay_glyph(x, y, (unsigned char)value, foreground, background);
+    vga_graphics_fill(x, y + VGA_OVERLAY_GLYPH_HEIGHT, VGA_CELL_WIDTH,
+        VGA_LINE_HEIGHT - VGA_OVERLAY_GLYPH_HEIGHT, background);
 }
 
 static void redraw_cursor(void)
@@ -265,7 +243,7 @@ static void redraw_cursor(void)
     render_cell(cell, cells[cell]);
     if (cursor_visible)
         rect(cell % COLUMNS * VGA_CELL_WIDTH,
-            cell / COLUMNS * VGA_LINE_HEIGHT + DISPLAY_GLYPH_HEIGHT - 1,
+            cell / COLUMNS * VGA_LINE_HEIGHT + VGA_OVERLAY_GLYPH_HEIGHT,
             VGA_CELL_WIDTH, 1, 15);
 }
 
@@ -363,10 +341,10 @@ void vga_graphics_demo(struct keyboard_state* keyboard)
 
     vga_graphics_begin_overlay();
     rect(0, 0, WIDTH, HEIGHT, 0);
-    draw_text(24, 20, "GPT-R OS / DEMO", 2, 15);
+    draw_text(24, 20, "GPT-R OS / DEMO", 15);
     for (unsigned int i = 0; i < 256; ++i)
         rect((WIDTH - 512) / 2 + i * 2, 64, 2, 28, i);
-    draw_text(24, HEIGHT - 24, "Setas: mover   Esc: voltar", 1, 15);
+    draw_text(24, HEIGHT - 29, "Setas: mover   Esc: voltar", 15);
     rect(x, y, SQUARE, SQUARE, colors[color]);
 
     for (;;) {

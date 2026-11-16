@@ -137,7 +137,7 @@ void kernel_main(void)
 
     unsigned int row = 2;
 #ifdef GPT_R_GRAPHICS
-    boot_log(&row, BOOT_OK, "Video VBE 640x480");
+    boot_log(&row, BOOT_OK, "Video VBE 1024x768");
 #else
     boot_log(&row, BOOT_OK, "Video VGA em modo texto");
 #endif
