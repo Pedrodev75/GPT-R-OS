@@ -665,13 +665,25 @@ void vga_graphics_scroll(unsigned int first_row, unsigned short blank)
     }
 }
 
-void vga_graphics_restore_console(void)
+void vga_graphics_present_panic(void)
 {
-    if (overlay_active) {
-        vga_graphics_end_frame();
-        vga_graphics_snapshot_console();
-        vga_graphics_resume_console();
-    }
+    if (!video)
+        return;
+
+    /* Fatal diagnostics bypass any unfinished desktop frame and its RAM buffers. */
+    frame_active = 0;
+    frame_storage = -1;
+    screen_cached = screen_ready = 0;
+    cursor_slot = 0;
+    mouse_visible = 0;
+    drag_outline.width = 0;
+    const unsigned short blank = (cells[0] & 0xff00) | ' ';
+    vga_graphics_clip(0, 0, WIDTH, HEIGHT);
+    vga_graphics_fill(0, 0, WIDTH, HEIGHT, palette[(blank >> 12) & 7]);
+    vga_graphics_place_console(VGA_CELL_WIDTH, VGA_LINE_HEIGHT);
+    for (unsigned int cell = 0; cell < CELL_COUNT; ++cell)
+        if (cells[cell] != blank)
+            render_cell(cell, cells[cell]);
 }
 
 void vga_graphics_demo(struct keyboard_state* keyboard)

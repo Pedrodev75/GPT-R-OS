@@ -1,6 +1,11 @@
 .intel_syntax noprefix
 .section .boot,"ax"
 .code16
+.equ LOADER_SECTORS, 16
+.equ KERNEL_HEADER_LBA, 1 + LOADER_SECTORS
+.equ KERNEL_BUFFER, 0x10000
+.equ KERNEL_BASE, 0x100000
+.equ KERNEL_LIMIT, 0x60000
 .global boot
 boot:
     ljmp 0, start
@@ -18,31 +23,17 @@ start:
     int 0x10
     pop dx
 
+    mov [boot_drive], dl
     test dl, 0x80
     jnz read_hd
 
-    # Split floppy reads at track boundaries and at physical 0x10000.
-    .macro read_floppy segment, offset, count, track, head
-        mov ax, \segment
-        mov es, ax
-        mov bx, \offset
-        mov ax, 0x0200 | \count
-        mov cx, \track
-        push dx
-        mov dh, \head
-        int 0x13
-        pop dx
-        jc disk_error
-    .endm
-    read_floppy 0,      0x7e00, 17, 0x0002, 0
-    read_floppy 0,      0xa000, 18, 0x0001, 1
-    read_floppy 0,      0xc400, 18, 0x0101, 0
-    read_floppy 0,      0xe800, 12, 0x0101, 1
-    read_floppy 0x1000, 0x0000,  6, 0x010d, 1
-    read_floppy 0x1000, 0x0c00, 18, 0x0201, 0
-    read_floppy 0x1000, 0x3000, 18, 0x0201, 1
-    read_floppy 0x1000, 0x5400, 18, 0x0301, 0
-    read_floppy 0x1000, 0x7800, 18, 0x0301, 1
+    # LBA 1..16 are on the first track of a 1.44 MiB floppy.
+    mov bx, 0x7e00
+    mov cx, 2
+    xor dh, dh
+    mov ax, 0x0200 | LOADER_SECTORS
+    int 0x13
+    jc disk_error
     jmp stage2
 read_hd:
     # Keep the BIOS-selected drive number across the EDD capability check.
@@ -67,10 +58,6 @@ read_hd:
     pop dx
     pop ds
     jc disk_error
-    mov si, offset disk_packet_high
-    mov ax, 0x4200
-    int 0x13
-    jc disk_error
     jmp stage2
 
 disk_error:
@@ -84,14 +71,11 @@ disk_error:
 .balign 4
 disk_packet:
     .byte 0x10, 0
-    .word 65
+    .word LOADER_SECTORS
     .word 0x7e00, 0
     .quad 1
-disk_packet_high:
-    .byte 0x10, 0
-    .word 78
-    .word 0, 0x1000
-    .quad 66
+boot_drive:
+    .byte 0
 
 # The HD image builder fills the partition table at bytes 446-509.
 .org 446
@@ -108,6 +92,10 @@ disk_packet_high:
 .equ FRAMEBUFFER_LARGE_PAGES, 3
 .endif
 stage2:
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+    call load_kernel
     call collect_e820
 .ifdef GPT_R_GRAPHICS
     # Copy 128 BIOS ROM 8x8 glyphs above the E820 handoff and below the stack.
@@ -181,6 +169,11 @@ stage2:
     jne vbe_error
 .endif
     cli
+    # Enable A20 before copying above 1 MiB (PC-compatible fast gate).
+    in al, 0x92
+    and al, 0xfe
+    or al, 2
+    out 0x92, al
     xor ax, ax
     mov ds, ax
     mov es, ax
@@ -257,6 +250,96 @@ vbe_error_message:
     .asciz "GPT-R OS: modo VBE 1024x768 indisponivel"
 .endif
 
+# One sector describes the payload independently of the bootstrap size.
+load_kernel:
+    mov word ptr [kernel_packet_lba], KERNEL_HEADER_LBA
+    mov word ptr [kernel_packet_seg], 0x09e0
+    mov word ptr [kernel_packet_count], 1
+    call read_kernel_chunk
+    cmp dword ptr [0x9e00], 0x4b525447  # "GTRK"
+    jne disk_error
+    mov eax, [0x9e04]
+    test eax, eax
+    jz disk_error
+    cmp eax, KERNEL_LIMIT
+    ja disk_error
+    mov [kernel_bytes], eax
+    add eax, 511
+    shr eax, 9
+    mov [kernel_sectors], ax
+    inc word ptr [kernel_packet_lba]
+    mov word ptr [kernel_packet_seg], KERNEL_BUFFER >> 4
+.next_chunk:
+    mov ax, [kernel_sectors]
+    test byte ptr [boot_drive], 0x80
+    jz .floppy_count
+    cmp ax, 64
+    jbe .read_count
+    mov ax, 64
+    jmp .read_count
+.floppy_count:
+    mov ax, 1
+.read_count:
+    mov [kernel_packet_count], ax
+    push ax
+    call read_kernel_chunk
+    pop ax
+    add [kernel_packet_lba], ax
+    shl ax, 5
+    add [kernel_packet_seg], ax
+    shr ax, 5
+    sub [kernel_sectors], ax
+    jnz .next_chunk
+    ret
+
+read_kernel_chunk:
+    push ds
+    mov dl, [boot_drive]
+    test dl, 0x80
+    jz .read_floppy
+    mov si, offset kernel_packet
+    mov ax, 0x4200
+    int 0x13
+    jmp .after_read
+.read_floppy:
+    mov ax, [kernel_packet_lba]
+    xor dx, dx
+    mov cx, 18
+    div cx
+    mov cl, dl
+    inc cl
+    shr ax, 1
+    mov ch, al
+    setc dh
+    mov dl, [boot_drive]
+    mov ax, [kernel_packet_seg]
+    mov es, ax
+    xor bx, bx
+    mov ax, 0x0201
+    int 0x13
+.after_read:
+    pop ds
+    jc disk_error
+    xor ax, ax
+    mov es, ax
+    cld
+    ret
+
+.balign 4
+kernel_packet:
+    .byte 0x10, 0
+kernel_packet_count:
+    .word 1
+    .word 0
+kernel_packet_seg:
+    .word 0
+kernel_packet_lba:
+    .quad 0
+kernel_sectors:
+    .word 0
+kernel_bytes:
+    .long 0
+
 # Handoff at physical 0x5000: count (u16), status (u16), then
 # up to 128 entries of 24 bytes. Entries end before 0x5c04.
 collect_e820:
@@ -330,7 +413,22 @@ long_mode:
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov esp, 0x7c00
+    mov esi, KERNEL_BUFFER
+    mov edi, KERNEL_BASE
+    mov ecx, [rip + kernel_bytes]
+    cld
+    rep movsb
+    jmp KERNEL_BASE
+
+.section .kernel_entry,"ax"
+.code64
+kernel_entry:
+    mov esp, 0x200000
+    lea rdi, [rip + __bss_start]
+    lea rcx, [rip + __bss_end]
+    sub rcx, rdi
+    xor eax, eax
+    rep stosb
     call kernel_main
 2:  hlt
     jmp 2b

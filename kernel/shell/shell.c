@@ -147,7 +147,12 @@ static const struct command {
     {"reboot", "Reinicia o sistema", command_reboot, 0},
     {"diskinfo", "Mostra o disco ATA", shell_diskinfo, 0},
     {"sector", "Mostra 16 bytes de um setor", shell_sector, "<LBA>"},
-    {"ls", "Lista arquivos FAT16", shell_ls, 0},
+    {"ls", "Lista pastas e arquivos FAT16", shell_ls, "[pasta]"},
+    {"cd", "Troca a pasta atual", shell_cd, "<pasta>"},
+    {"pwd", "Mostra o caminho da pasta atual", shell_pwd, 0},
+    {"mkdir", "Cria uma pasta", shell_mkdir, "<pasta>"},
+    {"cp", "Copia um arquivo", shell_cp, "<arquivo> <destino>"},
+    {"mv", "Move ou renomeia um arquivo", shell_mv, "<arquivo> <destino>"},
     {"cat", "Le texto com paginacao", shell_cat, "<arquivo>"},
     {"run", "Executa um .APP com argumentos", shell_run_app, "<arquivo.APP> [argumentos]"},
     {"asm", "Monta um fonte para .APP", shell_assemble, "<fonte.asm> <saida.APP>"},
@@ -243,17 +248,44 @@ static void remember_command(const unsigned char *line, unsigned int length)
         ++history.count;
 }
 
-static unsigned int recall_command(unsigned int row, unsigned char *line,
-    unsigned int old_length, const unsigned char *source)
+static unsigned int recall_command(unsigned char *line, const unsigned char *source)
 {
     unsigned int length = 0;
-    for (; source[length]; ++length) {
+    for (; source[length]; ++length)
         line[length] = source[length];
-        console_put(row * WIDTH + PROMPT_WIDTH + length, console_color | line[length]);
-    }
-    for (unsigned int i = length; i < old_length; ++i)
-        console_put(row * WIDTH + PROMPT_WIDTH + i, console_color | ' ');
     return length;
+}
+
+static unsigned int show_prompt(unsigned int row)
+{
+    enum { PATH_COLUMNS = WIDTH - 22 };
+    char path[FAT16_PATH_CAPACITY];
+    fat16_format_path(shell_directory(), path);
+    unsigned int length = 0, column = 0;
+    while (path[length])
+        ++length;
+    unsigned int start = 0;
+    if (length > PATH_COLUMNS) {
+        for (; column < 3; ++column)
+            console_put(row * WIDTH + column, console_color | '.');
+        start = length - (PATH_COLUMNS - 3);
+    }
+    for (unsigned int i = start; i < length; ++i)
+        console_put(row * WIDTH + column++, console_color | (unsigned char)path[i]);
+    console_put(row * WIDTH + column++, console_color | '>');
+    console_put(row * WIDTH + column++, console_color | ' ');
+    return column;
+}
+
+static unsigned int show_input(unsigned int row, unsigned int prompt,
+    const unsigned char *line, unsigned int length)
+{
+    const unsigned int visible = WIDTH - prompt;
+    const unsigned int first = length > visible ? length - visible : 0;
+    for (unsigned int i = 0; i < visible; ++i)
+        console_put(row * WIDTH + prompt + i,
+            console_color | (first + i < length ? line[first + i] : ' '));
+    return prompt + length - first;
 }
 
 static void execute(unsigned int *row, unsigned char *line, unsigned int length)
@@ -302,9 +334,9 @@ _Noreturn void shell_run(unsigned int row)
 
     for (;;) {
         unsigned int length = 0, distance = 0;
-        console_put(row * WIDTH, console_color | '>');
+        const unsigned int prompt = show_prompt(row);
         for (;;) {
-            const unsigned int col = PROMPT_WIDTH + length;
+            const unsigned int col = show_input(row, prompt, line, length);
             shell_move_cursor(row, col < WIDTH ? col : WIDTH - 1);
 #ifdef GPT_R_GRAPHICS
             const unsigned int key = desktop_wait_key(&keyboard, &row);
@@ -328,13 +360,12 @@ _Noreturn void shell_run(unsigned int row)
                     continue;
                 }
                 const unsigned int at = (history.next + HISTORY_LIMIT - distance) % HISTORY_LIMIT;
-                length = recall_command(row, line, length, distance ? history.entries[at] : draft);
+                length = recall_command(line, distance ? history.entries[at] : draft);
             } else if (key == '\b') {
                 if (length)
-                    console_put(row * WIDTH + PROMPT_WIDTH + --length, console_color | ' ');
+                    --length;
             } else if (key >= ' ' && key <= 255 && length < MAX_INPUT) {
                 line[length++] = key;
-                console_put(row * WIDTH + col, console_color | key);
             }
         }
         shell_next_row(&row);

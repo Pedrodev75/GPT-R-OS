@@ -164,6 +164,10 @@ void app_window_update(unsigned int slot)
         decimal(console, result.exit_code);
         next_row(console);
         break;
+    case APP_SAVE_ERROR:
+        print(console, "Falha ao salvar arquivo");
+        next_row(console);
+        break;
     case APP_INTERRUPTED:
         print(console, "Programa interrompido");
         next_row(console);

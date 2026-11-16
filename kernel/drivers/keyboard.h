@@ -16,7 +16,9 @@ enum {
     KEY_END,
     KEY_DELETE,
     KEY_F1,
-    KEY_SWITCH_WINDOW
+    KEY_SWITCH_WINDOW,
+    KEY_CUT,
+    KEY_PASTE
 };
 
 struct keyboard_state {

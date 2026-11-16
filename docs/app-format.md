@@ -154,3 +154,49 @@ desenho enquanto está em foco. O sistema conserva até sete cliques pendentes.
 O fonte [CALC.S](../apps/CALC.S) mostra como implementar botões, ler as
 coordenadas de um clique e redesenhar um visor. Na imagem, abra
 `APPS/CALC.APP` pelo Explorador.
+
+## Arquivos e memória
+
+As chamadas do Bloco 2 usam `int 0x80` e preservam os registradores, salvo
+`RAX`. Os caminhos absolutos começam com `/`. Caminhos relativos partem
+da pasta atual do Terminal ou da pasta pela qual o programa foi aberto no
+Explorador.
+
+| RAX | Chamada | Argumentos e retorno |
+|---|---|---|
+| 9 | `alloc` | `RDI` contém a quantidade de bytes. Retorna o endereço do bloco inicializado com zeros. |
+| 10 | `free` | `RDI` contém o endereço inicial retornado por `alloc`. Retorna 0. |
+| 11 | `open` | `RDI` aponta para o caminho terminado em NUL. `RSI` vale 0 para leitura ou 1 para gravação. Retorna o identificador do arquivo. |
+| 12 | `file_read` | `RDI` contém o identificador, `RSI` aponta para um buffer gravável e `RDX` contém o tamanho máximo. Retorna bytes lidos e 0 no fim do arquivo. |
+| 13 | `file_write` | `RDI` contém o identificador, `RSI` aponta para os bytes e `RDX` contém o tamanho. Retorna bytes aceitos. |
+| 14 | `close` | `RDI` contém o identificador. Confirma a gravação quando o arquivo foi aberto pra escrita e fecha o identificador. Retorna 0. |
+
+O heap tem até 256 KiB por processo e as alocações são arredondadas a
+páginas de 4 KiB. As páginas são separadas por processo. O kernel aceita
+buffers na pilha ou dentro de uma alocação ativa. Buffers usados apenas
+para leitura pelo kernel também podem estar na página de código e dados
+constantes. Cada pedido de arquivo transfere até 4 KiB.
+
+Cada processo pode abrir quatro arquivos. A leitura e a gravação avançam
+automaticamente. O modo de gravação prepara a substituição de um arquivo
+existente ou a criação de um novo, com até 64 KiB por identificador. A
+gravação é confirmada por `close` ou por `exit`. Uma interrupção ou uma
+exceção descarta as gravações abertas e libera os recursos do processo.
+Gravações já confirmadas permanecem no disco. A operação recusa salvar
+por cima de um arquivo que mudou enquanto o identificador estava aberto.
+
+Retornos negativos indicam erro.
+
+| Código | Significado |
+|---|---|
+| −1 | Argumento, ponteiro ou identificador inválido. |
+| −2 | Arquivo ou pasta ausente. |
+| −3 | Modo incompatível, entrada protegida ou outro gravador ativo. |
+| −4 | Falha de disco ou cadeia FAT inválida. |
+| −5 | Memória insuficiente. |
+| −6 | Limite de identificadores, tamanho ou espaço do volume. |
+| −7 | O arquivo mudou desde a abertura. |
+
+O exemplo [ARQTEST.S](../apps/ARQTEST.S) copia `/HOME/DOCS/entrada.txt`
+para `/HOME/DOCS/saida.txt` usando memória alocada na hora. Rode
+`run /APPS/ARQTEST.APP` e depois abra o resultado pelo Editor.

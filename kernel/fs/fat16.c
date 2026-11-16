@@ -259,3 +259,48 @@ enum fat16_read_result fat16_read(const struct fat16_volume* volume, const struc
     }
     return FAT16_READ_OK;
 }
+
+int fat16_read_range(const struct fat16_volume *vol, const struct fat16_file *file,
+    unsigned int offset, unsigned char *data, unsigned int size)
+{
+    if (offset > file->size || size > file->size - offset ||
+        (unsigned long long)file->size > (unsigned long long)vol->clusters *
+            vol->sectors_per_cluster * ATA_SECTOR_SIZE)
+        return 0;
+    if (!size)
+        return 1;
+    const int reaches_end = size == file->size - offset;
+    const unsigned int cluster_bytes = vol->sectors_per_cluster * ATA_SECTOR_SIZE;
+    unsigned int cluster = file->first_cluster;
+    while (offset >= cluster_bytes) {
+        if (!fat16_cluster_valid(vol, cluster) || !fat16_get_link(vol, cluster, &cluster))
+            return 0;
+        offset -= cluster_bytes;
+    }
+    unsigned char sector[ATA_SECTOR_SIZE];
+    while (size) {
+        if (!fat16_cluster_valid(vol, cluster))
+            return 0;
+        const unsigned int byte = offset % ATA_SECTOR_SIZE;
+        const unsigned int lba = fat16_cluster_lba(vol, cluster) + offset / ATA_SECTOR_SIZE;
+        if (!ata_read_sector(vol->disk, lba, sector))
+            return 0;
+        const unsigned int available = ATA_SECTOR_SIZE - byte;
+        const unsigned int copy = size < available ? size : available;
+        for (unsigned int i = 0; i < copy; ++i)
+            data[i] = sector[byte + i];
+        data += copy;
+        size -= copy;
+        offset += copy;
+        if (size && offset == cluster_bytes) {
+            if (!fat16_get_link(vol, cluster, &cluster))
+                return 0;
+            offset = 0;
+        }
+    }
+    if (reaches_end) {
+        unsigned int next;
+        return fat16_get_link(vol, cluster, &next) && next >= 0xfff8;
+    }
+    return 1;
+}

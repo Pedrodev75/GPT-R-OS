@@ -97,6 +97,13 @@ static void list_file(unsigned int *row, const struct fat16_file *file)
         decimal_field(line + 32, month, 2, '0');
         decimal_field(line + 37, 1980 + (file->modified_date >> 9), 4, '0');
     }
+    if (file->is_directory) {
+        for (unsigned int i = 14; i < 26; ++i)
+            line[i] = ' ';
+        line[21] = 'D';
+        line[22] = 'I';
+        line[23] = 'R';
+    }
     shell_print_line(row, line);
 }
 
@@ -108,10 +115,15 @@ void shell_ls(unsigned int *row, const unsigned char *argument)
     if (!shell_open_volume(row, &disk, &volume))
         return;
 
-    struct fat16_dir dir = {0};
+    struct fat16_path path;
+    if (fat16_resolve_dir(&volume, shell_directory(), argument, &path) != 1) {
+        shell_print_line(row, "Pasta nao encontrada");
+        return;
+    }
+    struct fat16_dir dir = { .first_cluster = fat16_path_cluster(&path) };
     struct fat16_file file;
     int result, found = 0;
-    while ((result = fat16_next(&volume, &dir, &file)) > 0) {
+    while ((result = fat16_next_at(&volume, &dir, &file)) > 0) {
         if (!found)
             shell_print_line(row, "Nome               Bytes   Modificado");
         list_file(row, &file);
@@ -120,7 +132,7 @@ void shell_ls(unsigned int *row, const unsigned char *argument)
     if (result < 0)
         shell_print_line(row, "Falha ao ler diretorio");
     else if (!found)
-        shell_print_line(row, "Diretorio raiz vazio");
+        shell_print_line(row, "Pasta vazia");
 }
 
 /* ABNT2 console glyph order, with Unicode values for UTF-8 on disk. */
@@ -287,7 +299,7 @@ static void finish_text(struct text_output *output)
 int shell_lookup_file(const struct fat16_volume *volume,
     const unsigned char *name, struct fat16_file *file)
 {
-    return fat16_lookup_at(volume, 0, name, file);
+    return fat16_resolve_file(volume, shell_directory(), name, 0, file);
 }
 
 int shell_find_file(unsigned int *row, const struct fat16_volume *volume,
@@ -389,7 +401,7 @@ static int pack_arguments(const unsigned char *text, unsigned char *args,
 void shell_run_app(unsigned int *row, const unsigned char *argument)
 {
     unsigned char args[APP_ARG_BYTES];
-    struct app_launch launch = { .args = args };
+    struct app_launch launch = { .args = args, .directory = shell_directory() };
     if (!pack_arguments(argument, args, &launch)) {
         shell_print_line(row, "Argumentos demais para run");
         return;
@@ -416,6 +428,9 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
     const struct app_result result = app_run(&volume, &file, &launch);
     finish_text(&output);
     switch (result.status) {
+    case APP_SAVE_ERROR:
+        shell_print_line(row, "Falha ao salvar arquivo");
+        break;
     case APP_EXITED:
         shell_print_number(row, "Codigo de saida: ", result.exit_code, "");
         break;
@@ -456,8 +471,7 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
     }
 }
 
-void shell_report_file_edit(unsigned int *row, enum fat16_edit_result result,
-    const char *success)
+const char *shell_file_error(enum fat16_edit_result result)
 {
     static const char *const errors[] = {
         [FAT16_EDIT_NAME] = "Use nome 8.3 sem misturar a caixa em cada parte",
@@ -468,33 +482,45 @@ void shell_report_file_edit(unsigned int *row, enum fat16_edit_result result,
         [FAT16_EDIT_PROTECTED] = "Entrada protegida ou com nome longo",
         [FAT16_EDIT_FULL] = "Disco ou diretorio cheio",
         [FAT16_EDIT_IO] = "Falha de disco ou FAT inconsistente",
-        [FAT16_EDIT_CLEANUP] = "Diretorio atualizado; falha ao liberar clusters antigos",
-        [FAT16_EDIT_EXISTS] = "Nome ja existe"
+        [FAT16_EDIT_CLEANUP] = "Concluido. Falha ao liberar clusters antigos",
+        [FAT16_EDIT_EXISTS] = "O destino ja existe",
+        [FAT16_EDIT_PARTIAL] = "Destino salvo. Falha ao remover a origem"
     };
-    shell_print_line(row, result == FAT16_EDIT_OK ? success : errors[result]);
+    return result > FAT16_EDIT_OK && (unsigned int)result < sizeof(errors) / sizeof(errors[0]) ?
+        errors[result] : 0;
+}
+
+void shell_report_file_edit(unsigned int *row, enum fat16_edit_result result, const char *success)
+{
+    const char *error = shell_file_error(result);
+    shell_print_line(row, error ? error : success);
 }
 
 static void edit_file(unsigned int *row, const unsigned char *argument, int remove)
 {
-    const unsigned char *name = shell_skip_spaces(argument);
-    const unsigned char *end = name;
-    while (*end && *end != ' ')
-        ++end;
-    const unsigned char *content = shell_skip_spaces(end);
-    if (name == end || (remove ? *content != 0 : *content == 0)) {
+    unsigned char path[FAT16_PATH_CAPACITY];
+    if (!shell_word(&argument, path, sizeof(path)) || (remove ? *argument != 0 : *argument == 0)) {
         shell_print_line(row, remove ? "Uso: rm <arquivo>" : "Uso: write <arquivo> <texto>");
         return;
     }
     unsigned char data[MAX_INPUT * 3];
-    const unsigned int length = remove ? 0 : encode_text(data, content);
+    const unsigned int length = remove ? 0 : encode_text(data, argument);
 
     struct ata_disk disk;
     struct fat16_volume volume;
+    struct fat16_location entry;
     if (!shell_open_volume(row, &disk, &volume))
         return;
+    if (fat16_resolve_parent(&volume, shell_directory(), path, &entry) != 1) {
+        shell_print_line(row, "Caminho invalido");
+        return;
+    }
+    unsigned int name_size = 0;
+    while (entry.name[name_size])
+        ++name_size;
     const enum fat16_edit_result result = remove ?
-        fat16_remove(&volume, name, end - name) :
-        fat16_write(&volume, name, end - name, data, length);
+        fat16_remove_at(&volume, entry.directory, entry.name, name_size) :
+        fat16_write_at(&volume, entry.directory, entry.name, name_size, data, length);
     shell_report_file_edit(row, result, remove ? "Arquivo removido" : "Arquivo salvo");
 }
 

@@ -39,6 +39,6 @@ void vga_graphics_overlay_glyph(unsigned int x, unsigned int y,
     unsigned char glyph, unsigned int rgb);
 void vga_graphics_overlay_cell(unsigned int x, unsigned int y,
     unsigned char glyph, unsigned int foreground, unsigned int background);
-void vga_graphics_restore_console(void);
+void vga_graphics_present_panic(void);
 
 #endif

@@ -1,4 +1,5 @@
 #include "app.h"
+#include "app_files.h"
 #include "../desktop/app_canvas.h"
 #include "../memory/pages.h"
 #include "../drivers/keyboard.h"
@@ -6,6 +7,8 @@
 enum {
     USER_IMAGE = 0x80000000u,
     USER_STACK = USER_IMAGE + 2 * PAGE_SIZE,
+    USER_HEAP_SLOT = 4, USER_HEAP = USER_IMAGE + USER_HEAP_SLOT * PAGE_SIZE,
+    APP_HEAP_PAGES = 64,
     USER_PDPT_SLOT = USER_IMAGE >> 30,
     PRESENT = 1, WRITABLE = 2, USER = 4
 };
@@ -41,7 +44,7 @@ static unsigned long long directory[512] __attribute__((aligned(PAGE_SIZE)));
 static unsigned long long table[512] __attribute__((aligned(PAGE_SIZE)));
 static unsigned long long stack_page_flags;
 
-enum process_state { UNUSED, READY, WAITING, WAITING_CLICK, FINISHED };
+enum process_state { UNUSED, READY, WAITING, WAITING_CLICK, WAITING_IO, FINISHED };
 
 struct process {
     struct app_frame frame;
@@ -49,7 +52,10 @@ struct process {
     enum process_state state;
     unsigned int pid;
     unsigned char *image, *stack;
-    unsigned int image_size, read_offset, read_capacity;
+    unsigned char *heap_pages[APP_HEAP_PAGES];
+    unsigned char heap_runs[APP_HEAP_PAGES];
+    unsigned int image_size, read_capacity;
+    unsigned long long read_address;
     void (*output)(void *, const unsigned char *, unsigned int);
     void *context;
     struct app_result result;
@@ -58,6 +64,8 @@ struct process {
 static struct process processes[APP_PROCESS_LIMIT];
 static struct process *running;
 static unsigned int next_slot, next_pid;
+static unsigned char io_buffer[APP_IO_LIMIT];
+static void service_file(struct process *process);
 
 static unsigned long long enable_nx(void)
 {
@@ -214,8 +222,17 @@ static unsigned long long build_user_stack(unsigned char *stack,
     return copied == launch->args_size ? USER_STACK + frame_at : 0;
 }
 
-static void release_pages(struct process *process)
+static void release_resources(struct process *process)
 {
+    const int saved = app_files_finish(process - processes, process->result.status == APP_EXITED);
+    if (saved && process->result.status == APP_EXITED)
+        process->result.status = APP_SAVE_ERROR;
+    for (unsigned int i = 0; i < APP_HEAP_PAGES; ++i) {
+        if (process->heap_pages[i])
+            page_free(process->heap_pages[i]);
+        process->heap_pages[i] = 0;
+        process->heap_runs[i] = 0;
+    }
     if (process->image) {
         page_free(process->stack);
         page_free(process->image);
@@ -230,9 +247,13 @@ static void dispatch(struct process *process)
     unsigned long long flags;
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
 
-    /* Only this process's two leaf mappings are user-accessible. */
+    /* Only this process's leaf mappings are user-accessible. */
     table[0] = (unsigned long long)process->image | PRESENT | USER;
     table[2] = (unsigned long long)process->stack | stack_page_flags;
+    for (unsigned int i = 0; i < APP_HEAP_PAGES; ++i) {
+        const unsigned long long page = (unsigned long long)process->heap_pages[i];
+        table[USER_HEAP_SLOT + i] = page ? page | stack_page_flags : 0;
+    }
     pml4[0] |= USER;
     pdpt[USER_PDPT_SLOT] = (unsigned long long)directory | PRESENT | WRITABLE | USER;
     flush_tlb();
@@ -247,8 +268,10 @@ static void dispatch(struct process *process)
     pml4[0] &= ~(unsigned long long)USER;
     flush_tlb();
     __asm__ volatile ("push %0; popfq" : : "r"(flags) : "cc", "memory");
-    if (process->state == FINISHED)
-        release_pages(process);
+    if (process->state == WAITING_IO)
+        service_file(process);
+    else if (process->state == FINISHED)
+        release_resources(process);
 }
 
 static unsigned int allocate_pid(void)
@@ -269,7 +292,8 @@ struct app_task_info app_task_info(unsigned int slot)
 {
     const struct process *process = &processes[slot];
     const enum app_task_state state = process->state == READY ? APP_TASK_RUNNING :
-        (process->state == WAITING || process->state == WAITING_CLICK) ? APP_TASK_WAITING : APP_TASK_FINISHED;
+        (process->state == WAITING || process->state == WAITING_CLICK ||
+         process->state == WAITING_IO) ? APP_TASK_WAITING : APP_TASK_FINISHED;
     return (struct app_task_info){ .pid = process->pid, .state = state };
 }
 
@@ -303,6 +327,7 @@ enum app_status app_start(unsigned int slot, const struct fat16_volume *volume,
                     .state = READY, .pid = allocate_pid(), .image = image, .stack = stack, .image_size = info.image_size,
                     .output = launch->output, .context = launch->context
                 };
+                app_files_begin(slot, volume, launch->directory);
                 /* FXSAVE layout: x87 control word 0x037f, MXCSR 0x1f80. */
                 process->fpu[0] = 0x7f;
                 process->fpu[1] = 0x03;
@@ -346,6 +371,157 @@ static int contains(unsigned long long address, unsigned long long length,
     return address >= start && length <= size && address - start <= size - length;
 }
 
+static int user_range(const struct process *process, unsigned long long address,
+    unsigned long long length, int writable)
+{
+    if (contains(address, length, USER_STACK, PAGE_SIZE) ||
+        (!writable && contains(address, length, USER_IMAGE, process->image_size)))
+        return 1;
+    if (!contains(address, length, USER_HEAP, APP_HEAP_PAGES * PAGE_SIZE) ||
+        address == USER_HEAP + APP_HEAP_PAGES * PAGE_SIZE)
+        return 0;
+    unsigned int start = (address - USER_HEAP) / PAGE_SIZE;
+    while (start && !process->heap_runs[start])
+        --start;
+    return process->heap_runs[start] &&
+        contains(address, length, USER_HEAP + start * PAGE_SIZE, process->heap_runs[start] * PAGE_SIZE);
+}
+
+static unsigned char *user_page(const struct process *process, unsigned long long address)
+{
+    const unsigned int page = (address - USER_IMAGE) / PAGE_SIZE;
+    if (page == 0)
+        return process->image;
+    if (page == 2)
+        return process->stack;
+    return process->heap_pages[page - USER_HEAP_SLOT];
+}
+
+/* Disk operations run with the user page tables detached. */
+static void copy_user(const struct process *process, unsigned long long address,
+    unsigned char *data, unsigned int size, int to_user)
+{
+    while (size) {
+        const unsigned int byte = address % PAGE_SIZE;
+        unsigned char *page = user_page(process, address);
+        const unsigned int room = PAGE_SIZE - byte;
+        const unsigned int count = size < room ? size : room;
+        for (unsigned int i = 0; i < count; ++i) {
+            if (to_user)
+                page[byte + i] = data[i];
+            else
+                data[i] = page[byte + i];
+        }
+        address += count;
+        data += count;
+        size -= count;
+    }
+}
+
+static int read_path(const struct process *process, unsigned long long address,
+    unsigned char path[FAT16_PATH_CAPACITY])
+{
+    for (unsigned int i = 0; i < FAT16_PATH_CAPACITY; ++i, ++address) {
+        if (!user_range(process, address, 1, 0))
+            return 0;
+        path[i] = user_page(process, address)[address % PAGE_SIZE];
+        if (!path[i])
+            return i != 0;
+    }
+    return 0;
+}
+
+static void service_file(struct process *process)
+{
+    const unsigned int slot = process - processes;
+    struct app_frame *frame = &process->frame;
+    const unsigned long long number = frame->rax, handle = frame->rdi;
+    long long result = APP_ERR_INVALID;
+    if (number == APP_SYS_OPEN) {
+        unsigned char path[FAT16_PATH_CAPACITY];
+        if (frame->rsi <= APP_FILE_WRITE_MODE && read_path(process, handle, path))
+            result = app_file_open(slot, path, frame->rsi);
+    } else if (handle <= 0xffffffffu) {
+        const unsigned long long address = frame->rsi, length = frame->rdx;
+        if (number == APP_SYS_CLOSE) {
+            result = app_file_close(slot, handle, 1);
+        } else if (length <= sizeof(io_buffer) &&
+            (!length || user_range(process, address, length, number == APP_SYS_FILE_READ))) {
+            if (number == APP_SYS_FILE_READ) {
+                result = app_file_read(slot, handle, io_buffer, length);
+                if (result > 0)
+                    copy_user(process, address, io_buffer, result, 1);
+            } else {
+                copy_user(process, address, io_buffer, length, 0);
+                result = app_file_write(slot, handle, io_buffer, length);
+            }
+        }
+    }
+    frame->rax = result;
+    process->state = READY;
+}
+
+static long long allocate_user(struct process *process, unsigned long long bytes)
+{
+    if (!bytes || bytes > APP_HEAP_PAGES * PAGE_SIZE)
+        return APP_ERR_INVALID;
+    const unsigned int count = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    unsigned int first = 0, run = 0;
+    for (unsigned int i = 0; i < APP_HEAP_PAGES && run < count; ++i) {
+        if (process->heap_pages[i]) {
+            run = 0;
+        } else if (run++ == 0) {
+            first = i;
+        }
+    }
+    if (run < count)
+        return APP_ERR_MEMORY;
+
+    unsigned int i = 0;
+    for (; i < count; ++i) {
+        unsigned char *page = page_alloc();
+        if (!page)
+            break;
+        for (unsigned int b = 0; b < PAGE_SIZE; ++b)
+            page[b] = 0;
+        process->heap_pages[first + i] = page;
+    }
+    if (i != count) {
+        while (i) {
+            --i;
+            page_free(process->heap_pages[first + i]);
+            process->heap_pages[first + i] = 0;
+        }
+        return APP_ERR_MEMORY;
+    }
+    process->heap_runs[first] = count;
+    for (i = 0; i < count; ++i)
+        table[USER_HEAP_SLOT + first + i] =
+            (unsigned long long)process->heap_pages[first + i] | stack_page_flags;
+    flush_tlb();
+    return USER_HEAP + first * PAGE_SIZE;
+}
+
+static long long free_user(struct process *process, unsigned long long address)
+{
+    if (address < USER_HEAP || address >= USER_HEAP + APP_HEAP_PAGES * PAGE_SIZE ||
+        address % PAGE_SIZE)
+        return APP_ERR_INVALID;
+    const unsigned int first = (address - USER_HEAP) / PAGE_SIZE;
+    const unsigned int count = process->heap_runs[first];
+    if (!count)
+        return APP_ERR_INVALID;
+    process->heap_runs[first] = 0;
+    for (unsigned int i = first; i < first + count; ++i)
+        table[USER_HEAP_SLOT + i] = 0;
+    flush_tlb();
+    for (unsigned int i = first; i < first + count; ++i) {
+        page_free(process->heap_pages[i]);
+        process->heap_pages[i] = 0;
+    }
+    return 0;
+}
+
 static _Noreturn void finish(struct app_result result)
 {
     running->result = result;
@@ -374,8 +550,7 @@ static void app_gui_syscall(struct app_frame *frame, unsigned long long number)
         break;
     case APP_GUI_TEXT: {
         const unsigned long long address = frame->rdx, size = frame->rcx;
-        if (contains(address, size, USER_STACK, PAGE_SIZE) ||
-            contains(address, size, USER_IMAGE, running->image_size))
+        if (user_range(running, address, size, 0))
             frame->rax = app_canvas_text(slot, frame->rdi, frame->rsi,
                 (const unsigned char *)address, size, frame->r8);
         break;
@@ -422,6 +597,20 @@ void app_syscall(struct app_frame *frame)
         return;
     if (number == 2)
         finish((struct app_result){ .status = APP_EXITED, .exit_code = argument });
+    if (number == APP_SYS_ALLOC) {
+        frame->rax = allocate_user(running, argument);
+        return;
+    }
+    if (number == APP_SYS_FREE) {
+        frame->rax = free_user(running, argument);
+        return;
+    }
+    if (number >= APP_SYS_OPEN && number <= APP_SYS_CLOSE) {
+        running->frame = *frame;
+        running->frame.rax = number;
+        running->state = WAITING_IO;
+        app_leave();
+    }
     if (number != 1 && number != 3) {
 #ifdef GPT_R_GRAPHICS
         app_gui_syscall(frame, number);
@@ -433,17 +622,16 @@ void app_syscall(struct app_frame *frame)
         return;
     }
 
-    const int in_stack = contains(argument, length, USER_STACK, PAGE_SIZE);
     if (number == 3) {
-        if (!in_stack)
+        if (length > APP_IO_LIMIT || !user_range(running, argument, length, 1))
             return;
-        running->read_offset = argument - USER_STACK;
+        running->read_address = argument;
         running->read_capacity = length;
         running->frame = *frame;
         running->state = WAITING;
         app_leave();
     }
-    if (!in_stack && !contains(argument, length, USER_IMAGE, running->image_size))
+    if (!user_range(running, argument, length, 0))
         return;
 
     running->output(running->context, (const unsigned char *)argument, length);
@@ -461,10 +649,9 @@ void app_complete_read(unsigned int slot, const unsigned char *bytes, unsigned i
     struct process *process = &processes[slot];
     if (process->state != WAITING || count >= process->read_capacity)
         return;
-    unsigned char *buffer = process->stack + process->read_offset;
-    for (unsigned int i = 0; i < count; ++i)
-        buffer[i] = bytes[i];
-    buffer[count] = 0;
+    copy_user(process, process->read_address, (unsigned char *)bytes, count, 1);
+    unsigned char zero = 0;
+    copy_user(process, process->read_address + count, &zero, 1, 1);
     process->frame.rax = count;
     process->state = READY;
 }
@@ -475,7 +662,7 @@ void app_cancel(unsigned int slot)
     if (process->state == READY || process->state == WAITING || process->state == WAITING_CLICK) {
         process->result = (struct app_result){ .status = APP_INTERRUPTED };
         process->state = FINISHED;
-        release_pages(process);
+        release_resources(process);
     }
 }
 
@@ -509,13 +696,12 @@ struct app_result app_run(const struct fat16_volume *volume,
         if (keyboard_take_interrupt()) {
             app_cancel(0);
         } else if (process->state == WAITING) {
-            unsigned char *buffer = process->stack + process->read_offset;
-            const unsigned int count = launch->input(launch->context, buffer,
+            const unsigned int count = launch->input(launch->context, io_buffer,
                 process->read_capacity);
             if (count >= process->read_capacity)
                 app_cancel(0);
             else
-                app_complete_read(0, buffer, count);
+                app_complete_read(0, io_buffer, count);
         } else {
             app_schedule();
         }

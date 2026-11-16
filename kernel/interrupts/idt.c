@@ -111,6 +111,33 @@ static void write_hex(unsigned int cell, const char* label,
         console_put(cell++, 0x4f00 | hex[(value >> shift) & 15]);
 }
 
+static void begin_crash_screen(void)
+{
+#ifdef GPT_R_GRAPHICS
+    vga_graphics_begin_overlay();
+#else
+    __asm__ volatile ("outb %%al, %%dx" : : "a"(0x0a), "d"(0x3d4));
+    __asm__ volatile ("outb %%al, %%dx" : : "a"(0x20), "d"(0x3d5));
+#endif
+    for (unsigned int i = 0; i < CONSOLE_WIDTH * CONSOLE_HEIGHT; ++i)
+        console_put(i, 0x4f20);
+}
+
+static void show_crash_screen(void)
+{
+#ifdef GPT_R_GRAPHICS
+    vga_graphics_present_panic();
+#endif
+}
+
+void crash_screen_notice(const char *message)
+{
+    begin_crash_screen();
+    write_text(0, "GPT-R OS - CRASH");
+    write_text(CONSOLE_WIDTH, message);
+    show_crash_screen();
+}
+
 _Noreturn void exception_panic(const struct exception_frame* frame)
 {
     static const char* const labels[] = {
@@ -122,17 +149,9 @@ _Noreturn void exception_panic(const struct exception_frame* frame)
         __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
     app_handle_exception(frame->cs, frame->vector, frame->rip, cr2);
 
-#ifdef GPT_R_GRAPHICS
-    vga_graphics_restore_console();
-    vga_graphics_cursor(CONSOLE_WIDTH * CONSOLE_HEIGHT);
-#else
-    __asm__ volatile ("outb %%al, %%dx" : : "a"(0x0a), "d"(0x3d4));
-    __asm__ volatile ("outb %%al, %%dx" : : "a"(0x20), "d"(0x3d5));
-#endif
-    for (unsigned int i = 0; i < CONSOLE_WIDTH * CONSOLE_HEIGHT; ++i)
-        console_put(i, 0x4f20);
+    begin_crash_screen();
     write_text(0, "GPT-R OS - CPU EXCEPTION");
-    const char* name = exception_names[frame->vector];
+    const char* name = frame->vector < EXCEPTION_COUNT ? exception_names[frame->vector] : 0;
     write_text(CONSOLE_WIDTH, name ? name : "Vetor reservado");
 
     write_hex(3 * CONSOLE_WIDTH, "VECTOR", frame->vector, " 0x");
@@ -146,6 +165,7 @@ _Noreturn void exception_panic(const struct exception_frame* frame)
     for (unsigned int i = 0; i < 15; ++i)
         write_hex((10 + i / 2) * CONSOLE_WIDTH + (i % 2) * (CONSOLE_WIDTH / 2),
             labels[i], frame->gpr[i], " ");
+    show_crash_screen();
     for (;;)
         __asm__ volatile ("cli; hlt");
 }

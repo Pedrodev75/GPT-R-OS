@@ -2,11 +2,11 @@
 #define GPT_R_SHELL_INTERNAL_H
 
 #include "../drivers/console.h"
-#include "../fs/fat16.h"
+#include "../fs/fat16_path.h"
 
 enum {
     WIDTH = CONSOLE_WIDTH, HEIGHT = CONSOLE_HEIGHT,
-    FIRST_ROW = 2, PROMPT_WIDTH = 2, MAX_INPUT = WIDTH - PROMPT_WIDTH
+    FIRST_ROW = 2, MAX_INPUT = 2 * FAT16_PATH_CAPACITY + 6
 };
 
 unsigned int shell_wait_key(void);
@@ -35,6 +35,13 @@ void shell_kfree(unsigned int *row, const unsigned char *argument);
 
 void shell_diskinfo(unsigned int *row, const unsigned char *argument);
 void shell_sector(unsigned int *row, const unsigned char *argument);
+const struct fat16_path *shell_directory(void);
+int shell_word(const unsigned char **argument, unsigned char *word, unsigned int capacity);
+void shell_cd(unsigned int *row, const unsigned char *argument);
+void shell_pwd(unsigned int *row, const unsigned char *argument);
+void shell_mkdir(unsigned int *row, const unsigned char *argument);
+void shell_cp(unsigned int *row, const unsigned char *argument);
+void shell_mv(unsigned int *row, const unsigned char *argument);
 void shell_ls(unsigned int *row, const unsigned char *argument);
 void shell_run_app(unsigned int *row, const unsigned char *argument);
 int shell_open_volume(unsigned int *row, struct ata_disk *disk, struct fat16_volume *volume);
@@ -42,11 +49,14 @@ int shell_lookup_file(const struct fat16_volume *volume,
     const unsigned char *name, struct fat16_file *file);
 int shell_find_file(unsigned int *row, const struct fat16_volume *volume,
     const unsigned char *name, struct fat16_file *file);
+const char *shell_file_error(enum fat16_edit_result result);
 void shell_report_file_edit(unsigned int *row, enum fat16_edit_result result,
     const char *success);
 void shell_edit(unsigned int *row, const unsigned char *argument);
 const char *shell_edit_file(const struct fat16_volume *volume, unsigned int directory,
     const unsigned char *name, const struct fat16_file *file);
+void shell_editor_moved(unsigned int from, const unsigned char *old_name,
+    unsigned int to, const unsigned char *new_name);
 void shell_editor_draw(unsigned int x, unsigned int y, int full);
 int shell_editor_key(unsigned int key);
 void shell_assemble(unsigned int *row, const unsigned char *argument);

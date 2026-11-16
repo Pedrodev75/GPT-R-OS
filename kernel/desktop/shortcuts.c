@@ -2,6 +2,7 @@
 
 #ifdef GPT_R_GRAPHICS
 #include "tool_view.h"
+#include "file_icons.h"
 #include "../fs/fat16.h"
 
 enum {
@@ -244,21 +245,12 @@ void shortcuts_draw(unsigned int selected)
         if (marked)
             vga_graphics_fill(x, y, SHORTCUT_WIDTH, SHORTCUT_HEIGHT, TOOL_HILITE);
         const unsigned int background = marked ? TOOL_HILITE : 0x15253a;
-        if (item->kind == SHORTCUT_FOLDER) {
-            vga_graphics_fill(x + 21, y + 9, 21, 8, TOOL_GOLD);
-            vga_graphics_fill(x + 21, y + 16, 44, 25, 0xc79352);
-            vga_graphics_fill(x + 23, y + 19, 40, 21, TOOL_GOLD);
-        } else {
-            const unsigned int color = item->kind == SHORTCUT_APP ? TOOL_BLUE : TOOL_TEXT;
-            vga_graphics_fill(x + 27, y + 8, 31, 34, color);
-            vga_graphics_fill(x + 32, y + 15, 20, 3, background);
-            vga_graphics_fill(x + 32, y + 22, 20, 3, background);
-            vga_graphics_fill(x + 32, y + 29, 13, 3, background);
-        }
         const char *title = item->target;
         for (const char *ch = title; *ch; ++ch)
             if (*ch == '/')
                 title = ch + 1;
+        file_icon_draw(file_icon_kind(title, item->kind == SHORTCUT_FOLDER),
+            x + 21, y + 1, 2, background);
         title = i == 0 ? "Home" : i == 1 ? "Apps" : title;
         unsigned int width = 0;
         while (width < 5 && title[width] && (item->kind == SHORTCUT_FOLDER || title[width] != '.'))

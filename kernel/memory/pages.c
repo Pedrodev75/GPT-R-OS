@@ -1,7 +1,7 @@
 #include "pages.h"
 
 enum {
-    FIRST_ADDRESS = 0x100000,
+    FIRST_ADDRESS = 0x200000,
     LARGE_PAGE_SIZE = 0x200000,
     END_ADDRESS = 0x40000000,
     DIRECTORY_ENTRIES = END_ADDRESS / LARGE_PAGE_SIZE,
@@ -59,12 +59,7 @@ void pages_init(const volatile struct e820_map* map)
             free_count += LARGE_PAGE_SIZE / PAGE_SIZE;
     }
 
-    /* Keep the bootloader, stack, E820 handoff and paging tables below 1 MiB. */
-    for (unsigned int i = 0; i < FIRST_ADDRESS / PAGE_SIZE; ++i) {
-        const unsigned int address = FIRST_ADDRESS + i * PAGE_SIZE;
-        pages[i] = complete && range_is_usable(map, address, PAGE_SIZE) ? FREE : RESERVED;
-        free_count += pages[i] == FREE;
-    }
+    /* The first 2 MiB hold the bootstrap, kernel and boot stack. */
     managed_count = free_count;
     search_end = PAGE_COUNT;
     unsigned long long cr3;

@@ -608,10 +608,24 @@ const char *shell_edit_file(const struct fat16_volume *volume, unsigned int dire
     return 0;
 }
 
+void shell_editor_moved(unsigned int from, const unsigned char *old_name,
+    unsigned int to, const unsigned char *new_name)
+{
+    if (!filename_size || from != current_directory || !shell_equals(old_name, (const char *)filename))
+        return;
+    filename_size = 0;
+    while (new_name[filename_size]) {
+        filename[filename_size] = new_name[filename_size];
+        ++filename_size;
+    }
+    filename[filename_size] = 0;
+    current_directory = to;
+}
+
 void shell_edit(unsigned int *row, const unsigned char *argument)
 {
-    const unsigned char *name = shell_skip_spaces(argument);
-    if (!*name) {
+    unsigned char path[FAT16_PATH_CAPACITY];
+    if (!shell_word(&argument, path, sizeof(path)) || *argument) {
         shell_print_line(row, "Uso: edit <arquivo>");
         return;
     }
@@ -619,13 +633,18 @@ void shell_edit(unsigned int *row, const unsigned char *argument)
     struct fat16_volume volume;
     if (!shell_open_volume(row, &disk, &volume))
         return;
+    struct fat16_location entry;
+    if (fat16_resolve_parent(&volume, shell_directory(), path, &entry) != 1) {
+        shell_print_line(row, "Caminho invalido");
+        return;
+    }
     struct fat16_file file;
-    const int found = fat16_lookup_at(&volume, 0, name, &file);
+    const int found = fat16_lookup_at(&volume, entry.directory, entry.name, &file);
     if (found < 0) {
         shell_print_line(row, "Falha ao ler diretorio");
         return;
     }
-    const char *error = shell_edit_file(&volume, 0, name, found ? &file : 0);
+    const char *error = shell_edit_file(&volume, entry.directory, entry.name, found ? &file : 0);
     if (error)
         shell_print_line(row, error);
 }

@@ -20,25 +20,11 @@ static int load_source(void *context, const unsigned char *data, unsigned int si
     return 1;
 }
 
-static int read_name(const unsigned char **argument, unsigned char name[13])
-{
-    const unsigned char *p = shell_skip_spaces(*argument);
-    unsigned int length = 0;
-    while (*p && *p != ' ') {
-        if (length == 12)
-            return 0;
-        name[length++] = *p++;
-    }
-    name[length] = 0;
-    *argument = shell_skip_spaces(p);
-    return length;
-}
-
 void shell_assemble(unsigned int *row, const unsigned char *argument)
 {
-    unsigned char input_name[13], output_name[13];
-    const int input_length = read_name(&argument, input_name);
-    const int output_length = read_name(&argument, output_name);
+    unsigned char input_name[FAT16_PATH_CAPACITY], output_name[FAT16_PATH_CAPACITY];
+    const int input_length = shell_word(&argument, input_name, sizeof(input_name));
+    const int output_length = shell_word(&argument, output_name, sizeof(output_name));
     if (!input_length || !output_length || *argument) {
         shell_print_line(row, "Uso: asm <fonte.asm> <saida.APP>");
         return;
@@ -54,6 +40,16 @@ void shell_assemble(unsigned int *row, const unsigned char *argument)
     if (!shell_open_volume(row, &disk, &volume) ||
         !shell_find_file(row, &volume, input_name, &file))
         return;
+    struct fat16_location output, input;
+    if (fat16_resolve_parent(&volume, shell_directory(), input_name, &input) != 1 ||
+        fat16_resolve_parent(&volume, shell_directory(), output_name, &output) != 1) {
+        shell_print_line(row, "Caminho invalido");
+        return;
+    }
+    if (input.directory == output.directory && shell_equals(input.name, (const char *)output.name)) {
+        shell_print_line(row, "Escolha outro nome para o executavel");
+        return;
+    }
     if (file.size > SOURCE_LIMIT) {
         shell_print_number(row, "Limite do fonte: ", SOURCE_LIMIT, " bytes");
         return;
@@ -74,15 +70,18 @@ void shell_assemble(unsigned int *row, const unsigned char *argument)
     }
 
     app_make_header(program, code_size, entry);
+    unsigned int size = 0;
+    while (output.name[size])
+        ++size;
     const enum fat16_edit_result result =
-        fat16_write(&volume, output_name, output_length, program, APP_HEADER_SIZE + code_size);
+        fat16_write_at(&volume, output.directory, output.name, size, program, APP_HEADER_SIZE + code_size);
     shell_report_file_edit(row, result, "APP montado e salvo");
 }
 
 void shell_appinfo(unsigned int *row, const unsigned char *argument)
 {
-    unsigned char name[13];
-    if (!read_name(&argument, name) || *argument) {
+    unsigned char name[FAT16_PATH_CAPACITY];
+    if (!shell_word(&argument, name, sizeof(name)) || *argument) {
         shell_print_line(row, "Uso: appinfo <arquivo.APP>");
         return;
     }

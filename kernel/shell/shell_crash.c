@@ -1,6 +1,7 @@
 #include "shell_internal.h"
 #include "../memory/pages.h"
 #include "../memory/heap.h"
+#include "../interrupts/idt.h"
 
 static void exhaust_pages(unsigned int *row)
 {
@@ -47,16 +48,24 @@ void shell_crash(unsigned int *row, const unsigned char *type)
                           : "rax", "memory");
     } else if (shell_equals(type, "int3")) {
         __asm__ volatile ("int3");
-    } else if (shell_equals(type, "alloc")) {
-        exhaust_pages(row);
-    } else if (shell_equals(type, "heap")) {
-        shell_print_line(row, heap_self_test() ? "crash heap: PASS" : "crash heap: FAIL");
+    } else if (shell_equals(type, "alloc") || shell_equals(type, "heap")) {
+        const unsigned short previous = console_color;
+        console_color = 0x4f00;
+        if (shell_equals(type, "alloc"))
+            exhaust_pages(row);
+        else
+            shell_print_line(row, heap_self_test() ? "crash heap: PASS" : "crash heap: FAIL");
+        console_color = previous;
     } else if (shell_equals(type, "hang")) {
-        __asm__ volatile ("cli; 1: pause; jmp 1b" : : : "memory");
+        __asm__ volatile ("cli" : : : "memory");
+        crash_screen_notice("HANG - Reinicie a maquina virtual");
+        __asm__ volatile ("1: pause; jmp 1b" : : : "memory");
         __builtin_unreachable();
     } else if (shell_equals(type, "triple")) {
         const unsigned char empty_idtr[10] = {0};
-        __asm__ volatile ("cli; lidt %0; ud2" : : "m"(empty_idtr) : "memory");
+        __asm__ volatile ("cli" : : : "memory");
+        crash_screen_notice("TRIPLE FAULT - Reiniciando");
+        __asm__ volatile ("lidt %0; ud2" : : "m"(empty_idtr) : "memory");
         __builtin_unreachable();
     } else {
         shell_print_line(row, "Uso: crash <ud|div|pf|gp|int3|alloc|heap|hang|triple>");

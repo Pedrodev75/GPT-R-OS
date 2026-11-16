@@ -624,7 +624,7 @@ static void launch(enum window_id choice, unsigned int *row)
 {
     menu_open = 0;
     if (choice == EDITOR && !windows[EDITOR].open) {
-        shell_edit(row, (const unsigned char *)"ola.asm");
+        shell_edit(row, (const unsigned char *)"/ola.asm");
         if (!windows[EDITOR].open)
             repaint_changed(0);
         return;

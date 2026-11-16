@@ -49,9 +49,12 @@ enum fat16_read_result fat16_read(const struct fat16_volume* volume, const struc
     int (*consume)(void*, const unsigned char*, unsigned int),
     void* context);
 
+int fat16_read_range(const struct fat16_volume *vol, const struct fat16_file *file,
+    unsigned int offset, unsigned char *data, unsigned int size);
+
 enum fat16_edit_result {
     FAT16_EDIT_OK, FAT16_EDIT_NAME, FAT16_EDIT_SIZE, FAT16_EDIT_MISSING,
-    FAT16_EDIT_PROTECTED, FAT16_EDIT_CASE, FAT16_EDIT_TEXT_EXTENSION, FAT16_EDIT_FULL, FAT16_EDIT_IO, FAT16_EDIT_CLEANUP, FAT16_EDIT_EXISTS
+    FAT16_EDIT_PROTECTED, FAT16_EDIT_CASE, FAT16_EDIT_TEXT_EXTENSION, FAT16_EDIT_FULL, FAT16_EDIT_IO, FAT16_EDIT_CLEANUP, FAT16_EDIT_EXISTS, FAT16_EDIT_PARTIAL
 };
 
 enum fat16_edit_result fat16_write(const struct fat16_volume* volume,
@@ -60,7 +63,20 @@ enum fat16_edit_result fat16_write(const struct fat16_volume* volume,
 enum fat16_edit_result fat16_write_at(const struct fat16_volume *volume,
     unsigned int directory, const unsigned char *name, unsigned int name_size,
     const unsigned char *text, unsigned int length);
+typedef int (*fat16_sector_source)(void *context, unsigned char sector[512], unsigned int size);
+enum fat16_edit_result fat16_write_stream_at(const struct fat16_volume *vol, unsigned int directory,
+    const unsigned char *name, unsigned int name_size, unsigned int length,
+    fat16_sector_source source, void *context);
+enum fat16_edit_result fat16_check_write(const struct fat16_volume *vol, unsigned int directory,
+    const unsigned char *name, unsigned int name_size);
 enum fat16_edit_result fat16_mkdir(const struct fat16_volume *volume,
+    unsigned int directory, const unsigned char *name, unsigned int name_size);
+enum fat16_edit_result fat16_create(const struct fat16_volume *volume,
+    unsigned int directory, const unsigned char *name, unsigned int name_size);
+enum fat16_edit_result fat16_transfer(const struct fat16_volume *volume,
+    unsigned int from, const unsigned char *old_name, unsigned int to,
+    const unsigned char *new_name, int move);
+enum fat16_edit_result fat16_remove_at(const struct fat16_volume *volume,
     unsigned int directory, const unsigned char *name, unsigned int name_size);
 unsigned int fat16_mutations(void);
 int fat16_dir_changed(unsigned int directory, unsigned int since);

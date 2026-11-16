@@ -1,11 +1,11 @@
 #ifndef GPT_R_APP_H
 #define GPT_R_APP_H
 
-#include "../fs/fat16.h"
+#include "../fs/fat16_path.h"
 
 enum app_status {
     APP_EXITED, APP_FAULTED, APP_INVALID, APP_READ_ERROR, APP_NO_MEMORY, APP_BAD_ARGS, APP_INTERRUPTED,
-    APP_STARTED, APP_LIMIT
+    APP_STARTED, APP_LIMIT, APP_SAVE_ERROR
 };
 
 struct app_result {
@@ -31,6 +31,7 @@ struct app_launch {
     void (*output)(void *, const unsigned char *, unsigned int);
     unsigned int (*input)(void *, unsigned char *, unsigned int);
     void *context;
+    const struct fat16_path *directory;
 };
 
 void app_init(void);

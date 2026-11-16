@@ -51,7 +51,7 @@ static unsigned int ctrl_keys, scan_pause;
 static int scan_extended;
 static unsigned int suppressed_shortcuts;
 
-enum scan_action { QUEUE_SCAN, DROP_SCAN, INTERRUPT_APP, SAVE_EDITOR };
+enum scan_action { QUEUE_SCAN, DROP_SCAN, INTERRUPT_APP, SAVE_EDITOR, CUT_FILE, PASTE_FILE };
 
 static enum scan_action scan_shortcut(unsigned char byte)
 {
@@ -79,9 +79,17 @@ static enum scan_action scan_shortcut(unsigned char byte)
         else
             ctrl_keys |= mask;
     }
-    if (extended || (code != 0x2e && code != 0x1f))
+    if (extended)
         return QUEUE_SCAN;
-    const unsigned int shortcut = code == 0x2e ? 1 : 2;
+    enum scan_action action;
+    switch (code) {
+    case 0x2e: action = INTERRUPT_APP; break;  /* C */
+    case 0x1f: action = SAVE_EDITOR; break;    /* S */
+    case 0x2d: action = CUT_FILE; break;       /* X */
+    case 0x2f: action = PASTE_FILE; break;     /* V */
+    default: return QUEUE_SCAN;
+    }
+    const unsigned int shortcut = 1u << (action - INTERRUPT_APP);
     if (suppressed_shortcuts & shortcut) {
         if (released)
             suppressed_shortcuts &= ~shortcut;
@@ -89,7 +97,7 @@ static enum scan_action scan_shortcut(unsigned char byte)
     }
     if (!released && ctrl_keys) {
         suppressed_shortcuts |= shortcut;
-        return shortcut == 1 ? INTERRUPT_APP : SAVE_EDITOR;
+        return action;
     }
     return QUEUE_SCAN;
 }
@@ -109,8 +117,10 @@ static enum scan_action receive_byte(unsigned char status)
         return DROP_SCAN;
     }
 #endif
-    if ((action == QUEUE_SCAN || action == SAVE_EDITOR) && next != tail) {
-        queue[head] = action == SAVE_EDITOR ? KEY_SAVE : byte;
+    if (next != tail &&
+        (action == QUEUE_SCAN || action == SAVE_EDITOR || action == CUT_FILE || action == PASTE_FILE)) {
+        queue[head] = action == SAVE_EDITOR ? KEY_SAVE :
+            action == CUT_FILE ? KEY_CUT : action == PASTE_FILE ? KEY_PASTE : byte;
         head = next;
     }
     return action;
@@ -178,7 +188,7 @@ unsigned int keyboard_poll(struct keyboard_state *keyboard)
     while (head != tail) {
         const unsigned int key = queue[tail];
         tail = (tail + 1) & QUEUE_MASK;
-        if (key == KEY_SAVE || key == KEY_INTERRUPT) {
+        if (key == KEY_SAVE || key == KEY_INTERRUPT || key == KEY_CUT || key == KEY_PASTE) {
             keyboard->extended = 0;
             keyboard->pause_bytes = 0;
             keyboard->accent = 0;

@@ -83,7 +83,7 @@ static int encode_name(struct short_name *name, const unsigned char *text,
 }
 
 static enum fat16_edit_result find_entry(const struct fat16_volume *vol, unsigned int directory,
-    const struct short_name *name, struct edit_entry *entry, int making_folder)
+    const struct short_name *name, struct edit_entry *entry, int exclusive)
 {
     struct fat16_dir dir = { .first_cluster = directory };
     *entry = (struct edit_entry){ .directory = directory };
@@ -125,7 +125,7 @@ static enum fat16_edit_result find_entry(const struct fat16_volume *vol, unsigne
         while (match < 11 && slot[match] == name->alias[match])
             ++match;
         if (match == 11) {
-            if (making_folder)
+            if (exclusive)
                 return FAT16_EDIT_EXISTS;
             if (((slot[12] ^ name->lower) & (name->lower | name->upper)) != 0)
                 return FAT16_EDIT_CASE;
@@ -167,11 +167,11 @@ static int fat_set(const struct fat16_volume *vol, unsigned int cluster,
     return 1;
 }
 
-static int find_free_cluster(const struct fat16_volume *vol, unsigned int *free)
+static int find_free_from(const struct fat16_volume *vol, unsigned int first, unsigned int *free)
 {
     unsigned char sector[512];
-    for (unsigned int cluster = 2; fat16_cluster_valid(vol, cluster); ++cluster) {
-        if ((cluster == 2 || !(cluster % 256)) &&
+    for (unsigned int cluster = first; fat16_cluster_valid(vol, cluster); ++cluster) {
+        if ((cluster == first || !(cluster % 256)) &&
             !ata_read_sector(vol->disk, vol->fat_start + cluster / 256, sector))
             return 0;
         if (get16(sector + (cluster % 256) * 2) == 0) {
@@ -232,7 +232,7 @@ static enum fat16_edit_result prepare_slot(const struct fat16_volume *vol,
 
     unsigned int next, end;
     if (!fat16_get_link(vol, entry->tail, &end) || end < 0xfff8 ||
-        !find_free_cluster(vol, &next))
+        !find_free_from(vol, 2, &next))
         return FAT16_EDIT_IO;
     if (!next)
         return FAT16_EDIT_FULL;
@@ -311,7 +311,7 @@ enum fat16_edit_result fat16_mkdir(const struct fat16_volume *vol, unsigned int 
         return result;
 
     unsigned int cluster;
-    if (!find_free_cluster(vol, &cluster))
+    if (!find_free_from(vol, 2, &cluster))
         return FAT16_EDIT_IO;
     if (!cluster)
         return FAT16_EDIT_FULL;
@@ -324,10 +324,32 @@ enum fat16_edit_result fat16_mkdir(const struct fat16_volume *vol, unsigned int 
     return FAT16_EDIT_OK;
 }
 
-enum fat16_edit_result fat16_write_at(const struct fat16_volume *vol,
-                                  unsigned int directory,
-                                  const unsigned char *text_name, unsigned int name_size,
-                                  const unsigned char *text, unsigned int length)
+static int uppercase_txt(const struct short_name *name)
+{
+    return (name->upper & FAT16_LOWER_EXTENSION) &&
+        name->alias[8] == 'T' && name->alias[9] == 'X' && name->alias[10] == 'T';
+}
+
+enum fat16_edit_result fat16_check_write(const struct fat16_volume *vol, unsigned int directory,
+    const unsigned char *text_name, unsigned int name_size)
+{
+    struct short_name name;
+    if (!encode_name(&name, text_name, name_size))
+        return FAT16_EDIT_NAME;
+    struct edit_entry entry;
+    const enum fat16_edit_result result = find_entry(vol, directory, &name, &entry, 0);
+    if (result != FAT16_EDIT_OK)
+        return result;
+    if (!entry.exists && uppercase_txt(&name))
+        return FAT16_EDIT_TEXT_EXTENSION;
+    if (entry.exists && !valid_chain(vol, &entry))
+        return FAT16_EDIT_IO;
+    return entry.lba || entry.tail ? FAT16_EDIT_OK : FAT16_EDIT_FULL;
+}
+
+static enum fat16_edit_result write_source(const struct fat16_volume *vol, unsigned int directory,
+    const unsigned char *text_name, unsigned int name_size, unsigned int length,
+    fat16_sector_source source, void *context, int exclusive)
 {
     struct short_name name;
     if (!encode_name(&name, text_name, name_size))
@@ -337,11 +359,10 @@ enum fat16_edit_result fat16_write_at(const struct fat16_volume *vol,
         return FAT16_EDIT_SIZE;
 
     struct edit_entry entry;
-    enum fat16_edit_result result = find_entry(vol, directory, &name, &entry, 0);
+    enum fat16_edit_result result = find_entry(vol, directory, &name, &entry, exclusive);
     if (result != FAT16_EDIT_OK)
         return result;
-    if (!entry.exists && (name.upper & FAT16_LOWER_EXTENSION) &&
-        name.alias[8] == 'T' && name.alias[9] == 'X' && name.alias[10] == 'T')
+    if (!entry.exists && uppercase_txt(&name))
         return FAT16_EDIT_TEXT_EXTENSION;
     result = prepare_slot(vol, &entry);
     if (result != FAT16_EDIT_OK)
@@ -352,7 +373,7 @@ enum fat16_edit_result fat16_write_at(const struct fat16_volume *vol,
     unsigned int cluster = 0, tail = 0, written = 0;
     while (written < length) {
         unsigned int next;
-        if (!find_free_cluster(vol, &next)) {
+        if (!find_free_from(vol, tail ? tail + 1 : 2, &next)) {
             result = FAT16_EDIT_IO;
             break;
         }
@@ -364,17 +385,30 @@ enum fat16_edit_result fat16_write_at(const struct fat16_volume *vol,
         const unsigned int first = fat16_cluster_lba(vol, next);
         unsigned char sector[512];
         for (unsigned int i = 0; i < vol->sectors_per_cluster && written < length; ++i) {
-            for (unsigned int j = 0; j < 512; ++j)
-                sector[j] = written < length ? text[written++] : 0;
+            const unsigned int size = length - written < sizeof(sector) ?
+                length - written : sizeof(sector);
+            if (!source(context, sector, size)) {
+                result = FAT16_EDIT_IO;
+                break;
+            }
+            for (unsigned int j = size; j < sizeof(sector); ++j)
+                sector[j] = 0;
             if (!ata_write_sector(vol->disk, first + i, sector)) {
                 result = FAT16_EDIT_IO;
                 break;
             }
+            written += size;
         }
         if (result != FAT16_EDIT_OK)
             break;
-        if (!fat_set(vol, next, 0, FAT16_END) ||
-            (tail && !fat_set(vol, tail, FAT16_END, next))) {
+        if (!fat_set(vol, next, 0, FAT16_END)) {
+            result = FAT16_EDIT_IO;
+            break;
+        }
+        if (tail && !fat_set(vol, tail, FAT16_END, next)) {
+            unsigned int link;
+            if (fat16_get_link(vol, tail, &link) && link >= 0xfff8)
+                fat_set(vol, next, FAT16_END, 0);
             result = FAT16_EDIT_IO;
             break;
         }
@@ -389,11 +423,45 @@ enum fat16_edit_result fat16_write_at(const struct fat16_volume *vol,
     }
 
     /* Publish the new chain before releasing the old one. */
-    if (!update_directory(vol, &entry, &name, cluster, length, 0x20))
+    if (!update_directory(vol, &entry, &name, cluster, length, 0x20)) {
+        /* Release the chain only if the directory still points elsewhere. */
+        unsigned char sector[512];
+        if (cluster && ata_read_sector(vol->disk, entry.lba, sector) &&
+            get16(sector + (entry.index % 16) * 32 + 26) != cluster)
+            release_chain(vol, cluster);
         return FAT16_EDIT_IO;
+    }
     if (entry.exists && !release_chain(vol, entry.first_cluster))
         return FAT16_EDIT_CLEANUP;
     return FAT16_EDIT_OK;
+}
+
+static int memory_sector(void *context, unsigned char sector[512], unsigned int size)
+{
+    const unsigned char **data = context;
+    for (unsigned int i = 0; i < size; ++i)
+        sector[i] = (*data)[i];
+    *data += size;
+    return 1;
+}
+
+enum fat16_edit_result fat16_write_stream_at(const struct fat16_volume *vol, unsigned int directory,
+    const unsigned char *name, unsigned int name_size, unsigned int length,
+    fat16_sector_source source, void *context)
+{
+    return write_source(vol, directory, name, name_size, length, source, context, 0);
+}
+
+enum fat16_edit_result fat16_write_at(const struct fat16_volume *vol, unsigned int directory,
+    const unsigned char *name, unsigned int name_size, const unsigned char *text, unsigned int length)
+{
+    return fat16_write_stream_at(vol, directory, name, name_size, length, memory_sector, &text);
+}
+
+enum fat16_edit_result fat16_create(const struct fat16_volume *vol, unsigned int directory,
+    const unsigned char *name, unsigned int name_size)
+{
+    return write_source(vol, directory, name, name_size, 0, 0, 0, 1);
 }
 
 enum fat16_edit_result fat16_write(const struct fat16_volume *vol,
@@ -402,14 +470,14 @@ enum fat16_edit_result fat16_write(const struct fat16_volume *vol,
     return fat16_write_at(vol, FAT16_ROOT, name, name_size, text, length);
 }
 
-enum fat16_edit_result fat16_remove(const struct fat16_volume *vol,
-                                   const unsigned char *text_name, unsigned int name_size)
+enum fat16_edit_result fat16_remove_at(const struct fat16_volume *vol, unsigned int directory,
+    const unsigned char *text_name, unsigned int name_size)
 {
     struct short_name name;
     if (!encode_name(&name, text_name, name_size))
         return FAT16_EDIT_NAME;
     struct edit_entry entry;
-    enum fat16_edit_result result = find_entry(vol, FAT16_ROOT, &name, &entry, 0);
+    enum fat16_edit_result result = find_entry(vol, directory, &name, &entry, 0);
     if (result == FAT16_EDIT_CASE)
         return FAT16_EDIT_MISSING;
     if (result != FAT16_EDIT_OK)
@@ -419,4 +487,103 @@ enum fat16_edit_result fat16_remove(const struct fat16_volume *vol,
     if (!valid_chain(vol, &entry) || !update_directory(vol, &entry, 0, 0, 0, 0))
         return FAT16_EDIT_IO;
     return release_chain(vol, entry.first_cluster) ? FAT16_EDIT_OK : FAT16_EDIT_CLEANUP;
+}
+
+
+enum fat16_edit_result fat16_remove(const struct fat16_volume *vol,
+    const unsigned char *name, unsigned int name_size)
+{
+    return fat16_remove_at(vol, FAT16_ROOT, name, name_size);
+}
+
+struct file_source {
+    const struct fat16_volume *volume;
+    unsigned int cluster, sector;
+};
+
+static int disk_sector(void *context, unsigned char sector[512], unsigned int size)
+{
+    struct file_source *source = context;
+    const struct fat16_volume *vol = source->volume;
+    (void)size;
+    if (source->sector == vol->sectors_per_cluster) {
+        if (!fat16_get_link(vol, source->cluster, &source->cluster))
+            return 0;
+        source->sector = 0;
+    }
+    if (!fat16_cluster_valid(vol, source->cluster))
+        return 0;
+    const unsigned int lba = fat16_cluster_lba(vol, source->cluster) + source->sector++;
+    return ata_read_sector(vol->disk, lba, sector);
+}
+
+static unsigned int name_length(const unsigned char *name)
+{
+    unsigned int length = 0;
+    while (name[length])
+        ++length;
+    return length;
+}
+
+static int same_alias(const struct short_name *one, const struct short_name *other)
+{
+    for (unsigned int i = 0; i < sizeof(one->alias); ++i)
+        if (one->alias[i] != other->alias[i])
+            return 0;
+    return 1;
+}
+
+static enum fat16_edit_result rename_entry(const struct fat16_volume *vol,
+    const struct edit_entry *entry, const struct short_name *name)
+{
+    unsigned char sector[512];
+    if (!ata_read_sector(vol->disk, entry->lba, sector))
+        return FAT16_EDIT_IO;
+    unsigned char *slot = sector + (entry->index % 16) * 32;
+    for (unsigned int i = 0; i < sizeof(name->alias); ++i)
+        slot[i] = name->alias[i];
+    slot[12] = (slot[12] & ~(FAT16_LOWER_BASE | FAT16_LOWER_EXTENSION)) | name->lower;
+    if (!ata_write_sector(vol->disk, entry->lba, sector))
+        return FAT16_EDIT_IO;
+    modified_dir[mutations % MUTATION_WINDOW] = entry->directory;
+    ++mutations;
+    return FAT16_EDIT_OK;
+}
+
+enum fat16_edit_result fat16_transfer(const struct fat16_volume *vol,
+    unsigned int from, const unsigned char *old_name, unsigned int to,
+    const unsigned char *new_name, int move)
+{
+    struct short_name old, next;
+    const unsigned int old_length = name_length(old_name), new_length = name_length(new_name);
+    if (!encode_name(&old, old_name, old_length) || !encode_name(&next, new_name, new_length))
+        return FAT16_EDIT_NAME;
+    if (uppercase_txt(&next))
+        return FAT16_EDIT_TEXT_EXTENSION;
+    struct edit_entry origin, destination;
+    enum fat16_edit_result result = find_entry(vol, from, &old, &origin, 0);
+    if (result != FAT16_EDIT_OK)
+        return result;
+    if (!origin.exists)
+        return FAT16_EDIT_MISSING;
+    if (!valid_chain(vol, &origin))
+        return FAT16_EDIT_IO;
+
+    if (move && from == to) {
+        if (!same_alias(&old, &next)) {
+            result = find_entry(vol, to, &next, &destination, 1);
+            if (result != FAT16_EDIT_OK)
+                return result;
+        }
+        return rename_entry(vol, &origin, &next);
+    }
+
+    /* Give the destination its own FAT chain before touching the source entry. */
+    struct file_source source = { .volume = vol, .cluster = origin.first_cluster };
+    result = write_source(vol, to, new_name, new_length, origin.size, disk_sector, &source, 1);
+    if (result != FAT16_EDIT_OK || !move)
+        return result;
+    if (!update_directory(vol, &origin, 0, 0, 0, 0))
+        return FAT16_EDIT_PARTIAL;
+    return release_chain(vol, origin.first_cluster) ? FAT16_EDIT_OK : FAT16_EDIT_CLEANUP;
 }
