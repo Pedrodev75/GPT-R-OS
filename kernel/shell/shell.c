@@ -115,7 +115,7 @@ static void command_clear(unsigned int *row, const unsigned char *argument)
 static void command_version(unsigned int *row, const unsigned char *argument)
 {
     (void)argument;
-    shell_print_line(row, "GPT-R OS v0.7.0");
+    shell_print_line(row, "GPT-R OS v0.7.2 - Kust Edition");
 }
 
 static void command_uptime(unsigned int *row, const unsigned char *argument)
