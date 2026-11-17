@@ -69,6 +69,8 @@ void shell_cp(unsigned int *row, const unsigned char *argument);
 void shell_mv(unsigned int *row, const unsigned char *argument);
 void shell_ls(unsigned int *row, const unsigned char *argument);
 void shell_run_app(unsigned int *row, const unsigned char *argument);
+int shell_run_escape(int quoted, unsigned char next);
+const char *shell_check_run_args(const unsigned char *argument);
 void shell_run_apps(unsigned int *row, const unsigned char *const *arguments,
     unsigned int count, struct shell_stream *stream);
 int shell_open_volume(unsigned int *row, struct ata_disk *disk, struct fat16_volume *volume);

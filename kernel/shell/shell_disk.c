@@ -364,36 +364,55 @@ void shell_cat(unsigned int *row, const unsigned char *argument)
         shell_print_error(row, "Falha ao ler arquivo ou cadeia FAT16");
 }
 
-static int pack_arguments(const unsigned char *text, unsigned char *args,
+int shell_run_escape(int quoted, unsigned char next)
+{
+    return next == '"' || (quoted ? next == '\\' : next == '|' || next == '>');
+}
+
+static const char *pack_arguments(const unsigned char *text, unsigned char *args,
     struct app_launch *launch)
 {
     for (text = shell_skip_spaces(text); *text; text = shell_skip_spaces(text)) {
-        if (launch->argc == APP_ARG_LIMIT)
-            return 0;
+        if (launch->argc == APP_ARG_LIMIT || launch->args_size == APP_ARG_BYTES)
+            return "Argumentos demais para run";
         ++launch->argc;
-        while (*text && *text != ' ') {
+        int quoted = 0;
+        while (*text && (quoted || *text != ' ')) {
+            unsigned char ch = *text++;
+            if (ch == '"') {
+                quoted = !quoted;
+                continue;
+            }
+            if (ch == '\\' && shell_run_escape(quoted, *text))
+                ch = *text++;
             unsigned char bytes[3];
-            const unsigned int size = shell_encode_glyph(bytes, *text++);
+            const unsigned int size = shell_encode_glyph(bytes, ch);
             if (size >= APP_ARG_BYTES - launch->args_size)
-                return 0;
+                return "Argumentos demais para run";
             for (unsigned int i = 0; i < size; ++i)
                 args[launch->args_size++] = bytes[i];
         }
+        if (quoted)
+            return "Aspas sem fechamento";
         args[launch->args_size++] = 0;
     }
-    return 1;
+    return launch->argc ? 0 : "Uso: run <arquivo.APP> [argumentos]";
+}
+
+const char *shell_check_run_args(const unsigned char *argument)
+{
+    struct app_launch launch = {0};
+    unsigned char args[APP_ARG_BYTES];
+    return pack_arguments(argument, args, &launch);
 }
 
 static int prepare_app(unsigned int *row, const unsigned char *argument, unsigned char *args,
     struct app_launch *launch, const struct fat16_volume *volume, struct fat16_file *file)
 {
     *launch = (struct app_launch){ .args = args, .directory = shell_directory() };
-    if (!pack_arguments(argument, args, launch)) {
-        shell_print_error(row, "Argumentos demais para run");
-        return 0;
-    }
-    if (!launch->argc) {
-        shell_print_error(row, "Uso: run <arquivo.APP> [argumentos]");
+    const char *error = pack_arguments(argument, args, launch);
+    if (error) {
+        shell_print_error(row, error);
         return 0;
     }
     if (!file_has_extension((const char *)args, ".APP")) {
@@ -446,6 +465,12 @@ static void report_app_result(unsigned int *row, struct app_result result)
         break;
     case APP_BAD_ARGS:
         shell_print_error(row, "Argumentos invalidos");
+        break;
+    case APP_NO_NX:
+        shell_print_error(row, "GTRA v1.1 exige suporte a NX");
+        break;
+    case APP_BAD_VERSION:
+        shell_print_error(row, "Versao GTRA incompativel");
         break;
     case APP_NO_MEMORY:
         shell_print_error(row, "Sem memoria para executar o programa");

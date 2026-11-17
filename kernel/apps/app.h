@@ -5,7 +5,7 @@
 
 enum app_status {
     APP_EXITED, APP_FAULTED, APP_INVALID, APP_READ_ERROR, APP_NO_MEMORY, APP_BAD_ARGS, APP_INTERRUPTED,
-    APP_STARTED, APP_LIMIT, APP_SAVE_ERROR, APP_OUTPUT_ERROR
+    APP_STARTED, APP_LIMIT, APP_SAVE_ERROR, APP_OUTPUT_ERROR, APP_NO_NX, APP_BAD_VERSION
 };
 
 struct app_result {
@@ -13,16 +13,27 @@ struct app_result {
     unsigned long long exit_code, vector, rip, fault_address;
 };
 
-enum { APP_HEADER_SIZE = 32, APP_IMAGE_LIMIT = 4096, APP_FORMAT_VERSION = 1 };
+enum {
+    APP_HEADER_PREFIX = 8, APP_HEADER_SIZE = 32, APP_IMAGE_LIMIT = 4096, APP_FORMAT_VERSION = 1,
+    APP_V11_HEADER_SIZE = 64, APP_V11_IMAGE_LIMIT = 65536, APP_V11_VERSION = 0x0101,
+    APP_FILE_MAX = APP_V11_HEADER_SIZE + APP_V11_IMAGE_LIMIT
+};
+#define APP_CODE_BASE 0x80000000ull
+#define APP_V11_DATA_BASE 0x80011000ull
+#define APP_V11_STACK_BASE 0x80022000ull
+#define APP_V11_HEAP_BASE 0x80027000ull
 struct app_info {
-    unsigned int image_size, entry;
+    unsigned int version, header_size, code_size, data_size, bss_size, entry;
 };
 
-/* Returns 1 for a valid app, 0 for bad format and -1 on I/O error. */
+/* Returns 1 for a valid app, 0 for bad format, -1 on I/O error and -2 for an unknown version. */
 int app_inspect(const struct fat16_volume *volume, const struct fat16_file *file,
     struct app_info *info);
-int app_validate_header(const unsigned char *header, unsigned int file_size, struct app_info *info);
-void app_make_header(unsigned char *header, unsigned int size, unsigned int entry);
+/* Returns a known header size, zero for invalid or incomplete input, or -2 for an unknown version. */
+int app_header_size(const unsigned char *header, unsigned int available);
+int app_validate_header(const unsigned char *header, unsigned int available,
+    unsigned int file_size, struct app_info *info);
+void app_make_header(unsigned char *header, const struct app_info *info);
 
 enum { APP_ARG_LIMIT = 40, APP_ARG_BYTES = 256 };
 

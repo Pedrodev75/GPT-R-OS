@@ -10,20 +10,50 @@ param(
     [Parameter(ParameterSetName = 'Binary')]
     [uint32] $EntryOffset = 0,
 
+    [Parameter(ParameterSetName = 'Binary')]
+    [ValidateSet('v1', 'v1.1')]
+    [string] $Format = 'v1',
+
+    [Parameter(ParameterSetName = 'Binary')]
+    [string] $DataPath,
+
+    [Parameter(ParameterSetName = 'Binary')]
+    [uint32] $BssSize = 0,
+
     [Parameter()]
     [string] $OutputPath = 'OLA.APP'
 )
 
 $ErrorActionPreference = 'Stop'
-$maxImageSize = 4096
+$extended = $Format -eq 'v1.1'
+$maxImageSize = if ($extended) { 65536 } else { 4096 }
+[byte[]] $data = @()
+if (!$extended -and ($DataPath -or $BssSize)) {
+    throw 'DataPath and BssSize require -Format v1.1.'
+}
+if ($BssSize -ge $maxImageSize) {
+    throw 'BSS leaves no room for code.'
+}
+
+function Read-AppSegment([string] $Path, [int] $Limit) {
+    $file = [System.IO.File]::OpenRead((Get-Item -LiteralPath $Path).FullName)
+    $reader = New-Object System.IO.BinaryReader -ArgumentList $file
+    try {
+        [byte[]] $bytes = $reader.ReadBytes($Limit + 1)
+        if ($bytes.Length -gt $Limit) {
+            throw "Segment exceeds the available $Limit bytes."
+        }
+        return ,$bytes
+    } finally {
+        $reader.Dispose()
+    }
+}
 
 if ($PSCmdlet.ParameterSetName -eq 'Binary') {
-    $inputFile = Get-Item -LiteralPath $InputPath
-    if ($inputFile -isnot [System.IO.FileInfo] -or
-        $inputFile.Length -lt 1 -or $inputFile.Length -gt $maxImageSize) {
-        throw 'The flat binary must contain 1 to 4096 bytes.'
+    [byte[]] $image = Read-AppSegment $InputPath ($maxImageSize - $BssSize)
+    if ($DataPath) {
+        $data = Read-AppSegment $DataPath ($maxImageSize - $BssSize - $image.Length)
     }
-    [byte[]] $image = [System.IO.File]::ReadAllBytes($inputFile.FullName)
 } else {
     [byte[]] $messageBytes = [System.Text.Encoding]::UTF8.GetBytes($Message + "`n")
 
@@ -48,7 +78,7 @@ if ($PSCmdlet.ParameterSetName -eq 'Binary') {
     [byte[]] $image = $code + $messageBytes
 }
 
-if ($image.Length -lt 1 -or $image.Length -gt $maxImageSize -or
+if ($image.Length -lt 1 -or $image.Length + $data.Length + $BssSize -gt $maxImageSize -or
     $EntryOffset -ge $image.Length) {
     throw 'The image or entry offset is out of range.'
 }
@@ -58,12 +88,27 @@ $stream = New-Object System.IO.MemoryStream
 $writer = New-Object System.IO.BinaryWriter -ArgumentList $stream
 try {
     $writer.Write([byte[]] [System.Text.Encoding]::ASCII.GetBytes('GTRA'))
-    $writer.Write([uint16] 1)
-    $writer.Write([uint16] 32)
-    $writer.Write([uint32] $image.Length)
-    $writer.Write([uint32] $EntryOffset)
-    $writer.Write([byte[]] (New-Object 'byte[]' 16))
+    if ($extended) {
+        $writer.Write([uint16] 0x0101)
+        $writer.Write([uint16] 64)
+        $writer.Write([uint32] 64)
+        $writer.Write([uint32] $image.Length)
+        $writer.Write([uint32] (64 + $image.Length))
+        $writer.Write([uint32] $data.Length)
+        $writer.Write([uint32] $BssSize)
+        $writer.Write([uint32] $EntryOffset)
+        $writer.Write([byte[]] (New-Object 'byte[]' 32))
+    } else {
+        $writer.Write([uint16] 1)
+        $writer.Write([uint16] 32)
+        $writer.Write([uint32] $image.Length)
+        $writer.Write([uint32] $EntryOffset)
+        $writer.Write([byte[]] (New-Object 'byte[]' 16))
+    }
     $writer.Write($image)
+    if ($extended) {
+        $writer.Write($data)
+    }
     $writer.Flush()
     [System.IO.File]::WriteAllBytes($destination, $stream.ToArray())
 } finally {

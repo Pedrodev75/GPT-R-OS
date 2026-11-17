@@ -1,38 +1,54 @@
-#include "app.h"
 #include "assembler.h"
+#include "../memory/pages.h"
+
+enum section { TEXT, DATA, BSS, SECTIONS };
 
 struct token {
-    const unsigned char *text;
-    unsigned int length;
+    const struct asm_io *io;
+    unsigned int start, length;
 };
 
 struct parser {
-    const unsigned char *at, *end;
+    const struct asm_io *io;
+    unsigned int at, end;
 };
 
 struct label {
-    struct token name;
-    unsigned int offset;
+    unsigned int start, length, offset;
+    enum section section;
+};
+
+enum {
+    LABEL_SLOTS = 2 * ASM_V11_LABEL_LIMIT, LABELS_PER_PAGE = PAGE_SIZE / sizeof(struct label),
+    LABEL_PAGES = (LABEL_SLOTS + LABELS_PER_PAGE - 1) / LABELS_PER_PAGE
 };
 
 struct assembler {
-    struct label labels[64];
-    unsigned int label_count, offset, entry;
-    int emit, entry_seen;
-    unsigned char *code;
+    const struct asm_io *io;
+    struct label *labels[LABEL_PAGES];
+    unsigned int label_limit, label_count, image_limit;
+    unsigned int offsets[SECTIONS], code_size, data_size, total, entry;
+    enum section section;
+    int extended, emit, entry_seen;
+    const char *error;
 };
+
+static unsigned char byte(const struct parser *parser)
+{
+    return parser->io->read(parser->io->context, parser->at);
+}
 
 static void skip_space(struct parser *parser)
 {
     while (parser->at < parser->end &&
-        (*parser->at == ' ' || *parser->at == '\t' || *parser->at == '\r'))
+        (byte(parser) == ' ' || byte(parser) == '\t' || byte(parser) == '\r'))
         ++parser->at;
 }
 
 static int take(struct parser *parser, unsigned char expected)
 {
     skip_space(parser);
-    if (parser->at == parser->end || *parser->at != expected)
+    if (parser->at == parser->end || byte(parser) != expected)
         return 0;
     ++parser->at;
     return 1;
@@ -46,20 +62,20 @@ static int letter(unsigned char ch)
 static struct token word(struct parser *parser)
 {
     skip_space(parser);
-    const unsigned char *start = parser->at;
-    if (start < parser->end && letter(*start)) {
+    const unsigned int start = parser->at;
+    if (start < parser->end && letter(byte(parser))) {
         ++parser->at;
         while (parser->at < parser->end &&
-            (letter(*parser->at) || (*parser->at >= '0' && *parser->at <= '9')))
+            (letter(byte(parser)) || (byte(parser) >= '0' && byte(parser) <= '9')))
             ++parser->at;
     }
-    return (struct token){ start, parser->at - start };
+    return (struct token){ parser->io, start, parser->at - start };
 }
 
 static int equals(struct token word, const char *text)
 {
     unsigned int i = 0;
-    while (i < word.length && word.text[i] == (unsigned char)text[i])
+    while (i < word.length && word.io->read(word.io->context, word.start + i) == (unsigned char)text[i])
         ++i;
     return i == word.length && !text[i];
 }
@@ -68,15 +84,15 @@ static int number(struct parser *parser, unsigned int *value)
 {
     skip_space(parser);
     unsigned int radix = 10;
-    if (parser->end - parser->at >= 2 && parser->at[0] == '0' &&
-        (parser->at[1] == 'x' || parser->at[1] == 'X')) {
+    if (parser->end - parser->at >= 2 && byte(parser) == '0' &&
+        (parser->io->read(parser->io->context, parser->at + 1) == 'x' || parser->io->read(parser->io->context, parser->at + 1) == 'X')) {
         radix = 16;
         parser->at += 2;
     }
-    const unsigned char *start = parser->at;
+    const unsigned int start = parser->at;
     *value = 0;
     while (parser->at < parser->end) {
-        const unsigned char ch = *parser->at;
+        const unsigned char ch = byte(parser);
         unsigned int digit;
         if (ch >= '0' && ch <= '9')
             digit = ch - '0';
@@ -94,23 +110,62 @@ static int number(struct parser *parser, unsigned int *value)
     return parser->at != start;
 }
 
-static const struct label *find_label(const struct assembler *a, struct token token)
+static unsigned char token_byte(struct token token, unsigned int index)
 {
-    for (unsigned int i = 0; i < a->label_count; ++i) {
-        const struct token name = a->labels[i].name;
-        if (name.length != token.length)
-            continue;
-        unsigned int j = 0;
-        while (j < name.length && name.text[j] == token.text[j])
-            ++j;
-        if (j == name.length)
-            return &a->labels[i];
+    return token.io->read(token.io->context, token.start + index);
+}
+
+static struct label *label_at(const struct assembler *a, unsigned int slot)
+{
+    struct label *page = a->labels[slot / LABELS_PER_PAGE];
+    return page ? &page[slot % LABELS_PER_PAGE] : 0;
+}
+
+/* The table is at most half full. Probe only within the current format's capacity. */
+static unsigned int label_slot(const struct assembler *a, struct token token)
+{
+    unsigned int hash = 2166136261u;
+    for (unsigned int i = 0; i < token.length; ++i)
+        hash = (hash ^ token_byte(token, i)) * 16777619u;
+    const unsigned int mask = 2 * a->label_limit - 1;
+    for (unsigned int slot = hash & mask;; slot = (slot + 1) & mask) {
+        const struct label *label = label_at(a, slot);
+        if (!label || !label->length)
+            return slot;
+        if (label->length == token.length) {
+            unsigned int i = 0;
+            while (i < token.length && token_byte(token, i) == a->io->read(a->io->context, label->start + i))
+                ++i;
+            if (i == token.length)
+                return slot;
+        }
     }
+}
+
+static const char *define_label(struct assembler *a, struct token token)
+{
+    const unsigned int slot = label_slot(a, token), page = slot / LABELS_PER_PAGE;
+    struct label *label = label_at(a, slot);
+    if (label && label->length)
+        return "rotulo duplicado";
+    if (a->label_count == a->label_limit)
+        return "rotulos demais";
+    if (!label) {
+        a->labels[page] = page_alloc();
+        if (!a->labels[page])
+            return "sem memoria para rotulos";
+        for (unsigned int i = 0; i < LABELS_PER_PAGE; ++i)
+            a->labels[page][i] = (struct label){0};
+        label = label_at(a, slot);
+    }
+    *label = (struct label){ token.start, token.length, a->offsets[a->section], a->section };
+    ++a->label_count;
     return 0;
 }
 
+/* Return an offset relative to the virtual base of .text. */
 static int label_value(const struct assembler *a, struct parser *parser,
-    unsigned int *value)
+    unsigned int *value, int require_text)
 {
     const struct token name = word(parser);
     if (!name.length)
@@ -118,10 +173,15 @@ static int label_value(const struct assembler *a, struct parser *parser,
     *value = 0;
     if (!a->emit)
         return 1;
-    const struct label *label = find_label(a, name);
-    if (!label)
+    const struct label *label = label_at(a, label_slot(a, name));
+    if (!label || !label->length ||
+        (require_text && (label->section != TEXT || label->offset >= a->code_size)))
         return 0;
     *value = label->offset;
+    if (label->section != TEXT)
+        *value += (unsigned int)(APP_V11_DATA_BASE - APP_CODE_BASE);
+    if (label->section == BSS)
+        *value += a->data_size;
     return 1;
 }
 
@@ -129,11 +189,11 @@ static int immediate(const struct assembler *a, struct parser *parser,
     unsigned int *value)
 {
     skip_space(parser);
-    if (parser->at < parser->end && letter(*parser->at)) {
+    if (parser->at < parser->end && letter(byte(parser))) {
         unsigned int base = 0;
-        if (!label_value(a, parser, value))
+        if (!label_value(a, parser, value, 0))
             return 0;
-        if (take(parser, '-') && !label_value(a, parser, &base))
+        if (take(parser, '-') && !label_value(a, parser, &base, 0))
             return 0;
         *value -= base;
         return 1;
@@ -146,14 +206,29 @@ static int immediate(const struct assembler *a, struct parser *parser,
     return 1;
 }
 
+static int reserve(struct assembler *a, unsigned int bytes)
+{
+    if (bytes > a->image_limit - a->total) {
+        a->error = "imagem excede o limite";
+        return 0;
+    }
+    a->total += bytes;
+    a->offsets[a->section] += bytes;
+    return 1;
+}
+
 static int emit(struct assembler *a, unsigned int value, unsigned int bytes)
 {
-    if (bytes > APP_IMAGE_LIMIT - a->offset)
+    const unsigned int offset = a->offsets[a->section] + (a->section == DATA ? a->code_size : 0);
+    if (!reserve(a, bytes))
         return 0;
-    for (unsigned int i = 0; i < bytes; ++i) {
-        if (a->emit)
-            a->code[a->offset] = value >> (i * 8);
-        ++a->offset;
+    if (a->emit) {
+        for (unsigned int i = 0; i < bytes; ++i) {
+            if (!a->io->write(a->io->context, offset + i, value >> (i * 8))) {
+                a->error = "sem memoria para a imagem";
+                return 0;
+            }
+        }
     }
     return 1;
 }
@@ -167,12 +242,14 @@ static int data_items(struct assembler *a, struct parser *parser)
                 return 0;
             continue;
         }
-        while (parser->at < parser->end && *parser->at != '"') {
-            unsigned char ch = *parser->at++;
+        while (parser->at < parser->end && byte(parser) != '"') {
+            unsigned char ch = byte(parser);
+            ++parser->at;
             if (ch == '\\') {
                 if (parser->at == parser->end)
                     return 0;
-                ch = *parser->at++;
+                ch = byte(parser);
+                ++parser->at;
                 if (ch == 'n')
                     ch = '\n';
                 else if (ch == 'r')
@@ -269,7 +346,7 @@ static int assemble_mov(struct assembler *a, struct parser *parser)
         return read_memory(parser, &memory) && prefix(a, dest) &&
             emit(a, 0x8b, 1) && emit_memory(a, dest, &memory);
 
-    const unsigned char *start = parser->at;
+    const unsigned int start = parser->at;
     const int src = read_register(parser);
     if (src >= 0)
         return (dest & WIDE) == (src & WIDE) && prefix(a, dest) &&
@@ -296,7 +373,7 @@ static int assemble_binary(struct assembler *a, struct parser *parser,
     const int dest = read_register(parser);
     if (dest < 0 || !take(parser, ',') || !prefix(a, dest))
         return 0;
-    const unsigned char *start = parser->at;
+    const unsigned int start = parser->at;
     const int src = read_register(parser);
     if (src >= 0) {
         if ((dest & WIDE) != (src & WIDE))
@@ -326,9 +403,9 @@ struct unary_opcode {
 static int assemble_jump(struct assembler *a, struct parser *parser, unsigned int opcode)
 {
     unsigned int target;
-    return label_value(a, parser, &target) &&
+    return label_value(a, parser, &target, a->extended) &&
         emit(a, opcode, opcode > 255 ? 2 : 1) &&
-        emit(a, target - (a->offset + 4), 4);
+        emit(a, target - (a->offsets[TEXT] + 4), 4);
 }
 
 static const char *instruction(struct assembler *a, struct parser *parser,
@@ -354,6 +431,16 @@ static const char *instruction(struct assembler *a, struct parser *parser,
         {"push", 0x50, -1}, {"pop", 0x58, -1}
     };
     const char *bad_operand = "operando, rotulo ou tamanho invalido";
+    if (equals(op, "db"))
+        return a->section != BSS && data_items(a, parser) ? 0 : bad_operand;
+    if (a->extended && equals(op, "resb")) {
+        unsigned int bytes;
+        if (a->section != BSS)
+            return "resb so e permitido em .bss";
+        return number(parser, &bytes) && reserve(a, bytes) ? 0 : bad_operand;
+    }
+    if (a->section != TEXT)
+        return "instrucao fora de .text";
     for (unsigned int i = 0; i < sizeof(binary) / sizeof(binary[0]); ++i)
         if (equals(op, binary[i].name))
             return assemble_binary(a, parser, &binary[i]) ? 0 : bad_operand;
@@ -387,7 +474,7 @@ static const char *instruction(struct assembler *a, struct parser *parser,
         struct memory memory;
         ok = dest >= 0 && take(parser, ',') && equals(word(parser), "byte");
         if (ok) {
-            const unsigned char *start = parser->at;
+            const unsigned int start = parser->at;
             if (!equals(word(parser), "ptr"))
                 parser->at = start;
             ok = take(parser, '[') && read_memory(parser, &memory) && prefix(a, dest) &&
@@ -397,18 +484,16 @@ static const char *instruction(struct assembler *a, struct parser *parser,
         const int dest = read_register(parser);
         ok = dest >= WIDE && take(parser, ',') && take(parser, '[') &&
             equals(word(parser), "rip") && take(parser, '+') &&
-            label_value(a, parser, &value) && take(parser, ']') &&
+            label_value(a, parser, &value, 0) && take(parser, ']') &&
             emit(a, 0x8d48, 2) && emit(a, ((dest & 7) << 3) | 5, 1) &&
-            emit(a, value - (a->offset + 4), 4);
+            emit(a, value - (a->offsets[TEXT] + 4), 4);
     } else if (equals(op, "int")) {
         ok = number(parser, &value) && value == 0x80 && emit(a, 0x80cd, 2);
-    } else if (equals(op, "db")) {
-        ok = data_items(a, parser);
     } else if (equals(op, "entry")) {
         if (a->entry_seen)
             return "entry duplicado";
         a->entry_seen = 1;
-        ok = label_value(a, parser, &a->entry);
+        ok = label_value(a, parser, &a->entry, a->extended);
     } else {
         return "instrucao desconhecida";
     }
@@ -418,21 +503,37 @@ static const char *instruction(struct assembler *a, struct parser *parser,
 static int at_end(struct parser *parser)
 {
     skip_space(parser);
-    return parser->at == parser->end || *parser->at == ';';
+    return parser->at == parser->end || byte(parser) == ';';
+}
+
+static const char *select_section(struct assembler *a, struct parser *parser)
+{
+    if (!a->extended || !equals(word(parser), "section") || !take(parser, '.'))
+        return "diretiva de secao invalida";
+    const struct token name = word(parser);
+    if (equals(name, "text"))
+        a->section = TEXT;
+    else if (equals(name, "data"))
+        a->section = DATA;
+    else if (equals(name, "bss"))
+        a->section = BSS;
+    else
+        return "secao desconhecida";
+    return at_end(parser) ? 0 : "texto inesperado no fim da linha";
 }
 
 static const char *assemble_line(struct assembler *a, struct parser *parser)
 {
     if (at_end(parser))
         return 0;
+    if (take(parser, '.'))
+        return select_section(a, parser);
     struct token op = word(parser);
     if (op.length && take(parser, ':')) {
         if (!a->emit) {
-            if (find_label(a, op))
-                return "rotulo duplicado";
-            if (a->label_count == sizeof(a->labels) / sizeof(a->labels[0]))
-                return "rotulos demais";
-            a->labels[a->label_count++] = (struct label){ op, a->offset };
+            const char *error = define_label(a, op);
+            if (error)
+                return error;
         }
         if (at_end(parser))
             return 0;
@@ -440,38 +541,63 @@ static const char *assemble_line(struct assembler *a, struct parser *parser)
     }
     const char *error = instruction(a, parser, op);
     if (error)
-        return error;
+        return a->error ? a->error : error;
     return at_end(parser) ? 0 : "texto inesperado no fim da linha";
 }
 
-const char *app_assemble(const unsigned char *source, unsigned int source_size,
-    unsigned char *code, unsigned int *code_size, unsigned int *entry,
-    unsigned int *error_line)
+static const char *assemble_passes(struct assembler *a, unsigned int source_size,
+    struct app_info *info, unsigned int *error_line)
 {
-    struct assembler assembler;
-    assembler.label_count = 0;
-    assembler.code = code;
-    const unsigned char *end = source + source_size;
-    for (assembler.emit = 0; assembler.emit <= 1; ++assembler.emit) {
-        assembler.offset = assembler.entry = 0;
-        assembler.entry_seen = 0;
+    for (a->emit = 0; a->emit <= 1; ++a->emit) {
+        a->section = TEXT;
+        a->offsets[TEXT] = a->offsets[DATA] = a->offsets[BSS] = 0;
+        a->entry = a->total = 0;
+        a->entry_seen = 0;
         *error_line = 1;
-        const unsigned char *line = source;
-        while (line < end) {
-            const unsigned char *next = line;
-            while (next < end && *next != '\n')
+        unsigned int line = 0;
+        while (line < source_size) {
+            unsigned int next = line;
+            while (next < source_size && a->io->read(a->io->context, next) != '\n')
                 ++next;
-            struct parser parser = { line, next };
-            const char *error = assemble_line(&assembler, &parser);
+            struct parser parser = { a->io, line, next };
+            const char *error = assemble_line(a, &parser);
             if (error)
                 return error;
-            line = next < end ? next + 1 : end;
+            line = next < source_size ? next + 1 : source_size;
             ++*error_line;
         }
+        a->code_size = a->offsets[TEXT];
+        a->data_size = a->offsets[DATA];
     }
-    if (assembler.entry >= assembler.offset)
+    if (a->entry >= a->code_size)
         return "programa vazio ou entry fora do codigo";
-    *code_size = assembler.offset;
-    *entry = assembler.entry;
+    info->code_size = a->code_size;
+    info->data_size = a->data_size;
+    info->bss_size = a->offsets[BSS];
+    info->entry = a->entry;
     return 0;
+}
+
+const char *app_assemble(const struct asm_io *io, unsigned int source_size,
+    unsigned int version, struct app_info *info, unsigned int *error_line)
+{
+    *error_line = 1;
+    if (version != APP_FORMAT_VERSION && version != APP_V11_VERSION)
+        return "versao GTRA incompativel";
+    const int extended = version == APP_V11_VERSION;
+    if (source_size > (unsigned int)(extended ? ASM_V11_SOURCE_LIMIT : ASM_V1_SOURCE_LIMIT))
+        return "fonte excede o limite";
+    struct assembler a = {
+        .io = io, .extended = extended,
+        .label_limit = extended ? ASM_V11_LABEL_LIMIT : ASM_V1_LABEL_LIMIT,
+        .image_limit = extended ? APP_V11_IMAGE_LIMIT : APP_IMAGE_LIMIT
+    };
+    *info = (struct app_info){
+        .version = version, .header_size = extended ? APP_V11_HEADER_SIZE : APP_HEADER_SIZE
+    };
+    const char *error = assemble_passes(&a, source_size, info, error_line);
+    for (unsigned int i = 0; i < LABEL_PAGES; ++i)
+        if (a.labels[i])
+            page_free(a.labels[i]);
+    return error;
 }

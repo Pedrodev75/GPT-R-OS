@@ -177,7 +177,7 @@ static const struct command {
     {"mv", "Move ou renomeia um arquivo", shell_mv, "<arquivo> <destino>", 0},
     {"cat", "Le texto com paginacao", shell_cat, "<arquivo>", COMMAND_OUTPUT | COMMAND_INPUT},
     {"run", "Executa um .APP com argumentos", shell_run_app, "<arquivo.APP> [argumentos]", COMMAND_OUTPUT | COMMAND_INPUT},
-    {"asm", "Monta um fonte para .APP", shell_assemble, "<fonte.asm> <saida.APP>", 0},
+    {"asm", "Monta um fonte para .APP", shell_assemble, "[-f v1.1] <fonte.asm> <saida.APP>", 0},
     {"appinfo", "Mostra o cabecalho de um .APP", shell_appinfo, "<arquivo.APP>", COMMAND_OUTPUT},
 #ifdef GPT_R_GRAPHICS
     {"edit", "Abre o editor grafico de texto", shell_edit, "<arquivo>", 0},
@@ -342,6 +342,13 @@ static int parse_stage(unsigned int *row, unsigned char *text, struct shell_stag
     for (unsigned int i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
         const unsigned char *argument = argument_for(start, commands[i].name);
         if (argument && (commands[i].usage || !*argument)) {
+            if (commands[i].run == shell_run_app) {
+                const char *error = shell_check_run_args(argument);
+                if (error) {
+                    shell_print_error(row, error);
+                    return 0;
+                }
+            }
             *stage = (struct shell_stage){&commands[i], argument};
             return 1;
         }
@@ -474,12 +481,17 @@ static void execute(unsigned int *row, unsigned char *line, unsigned int length)
     struct shell_stage stages[PIPE_STAGES];
     unsigned int count = 0;
     unsigned char *part = line, *next = line, *redirect = 0;
+    int app_args = argument_for(line, "run") != 0, quoted = 0;
     for (const unsigned char *p = line; *p; ++p) {
-        if (*p == '\\' && (p[1] == '|' || p[1] == '>')) {
+        if (*p == '\\' && (app_args ? shell_run_escape(quoted, p[1]) : p[1] == '|' || p[1] == '>')) {
+            if (app_args)
+                *next++ = *p;
             *next++ = *++p;
             continue;
         }
-        if (*p != '|' && *p != '>') {
+        if (app_args && *p == '"')
+            quoted = !quoted;
+        if (quoted || (*p != '|' && *p != '>')) {
             *next++ = *p;
             continue;
         }
@@ -492,8 +504,13 @@ static void execute(unsigned int *row, unsigned char *line, unsigned int length)
         if (!parse_stage(row, part, &stages[count++]))
             return;
         part = next;
+        app_args = op == '|' && argument_for(shell_skip_spaces(p + 1), "run") != 0;
         if (op == '>')
             redirect = part;
+    }
+    if (quoted) {
+        shell_print_error(row, "Aspas sem fechamento");
+        return;
     }
     *next = 0;
     if (!redirect) {

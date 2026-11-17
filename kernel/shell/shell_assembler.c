@@ -1,39 +1,100 @@
 #include "shell_internal.h"
-#include "../apps/app.h"
 #include "../apps/assembler.h"
 #include "../fs/file_type.h"
 
-enum { SOURCE_LIMIT = 4096 };
-static unsigned char source[SOURCE_LIMIT];
-static unsigned char program[APP_HEADER_SIZE + APP_IMAGE_LIMIT];
+enum { ASM_BUFFER_PAGES = ASM_V11_SOURCE_LIMIT / PAGE_SIZE };
 
-struct source_reader {
-    unsigned int written;
+struct assembly_buffer {
+    unsigned char *pages[ASM_BUFFER_PAGES];
 };
+
+struct assembly {
+    struct assembly_buffer source, program;
+    unsigned char header[APP_V11_HEADER_SIZE];
+    unsigned int source_size, header_size, written;
+    int no_memory;
+};
+
+static int buffer_write(struct assembly_buffer *buffer, unsigned int at, unsigned char byte)
+{
+    if (at / PAGE_SIZE >= ASM_BUFFER_PAGES)
+        return 0;
+    unsigned char **page = &buffer->pages[at / PAGE_SIZE];
+    if (!*page)
+        *page = page_alloc();
+    if (!*page)
+        return 0;
+    (*page)[at % PAGE_SIZE] = byte;
+    return 1;
+}
+
+static unsigned char buffer_read(const struct assembly_buffer *buffer, unsigned int at)
+{
+    return buffer->pages[at / PAGE_SIZE][at % PAGE_SIZE];
+}
+
+static void release_buffer(struct assembly_buffer *buffer)
+{
+    for (unsigned int i = 0; i < ASM_BUFFER_PAGES; ++i)
+        if (buffer->pages[i])
+            page_free(buffer->pages[i]);
+}
 
 static int load_source(void *context, const unsigned char *data, unsigned int size)
 {
-    struct source_reader *reader = context;
-    if (size > sizeof(source) - reader->written)
-        return 0;
-    for (unsigned int i = 0; i < size; ++i)
-        source[reader->written++] = data[i];
+    struct assembly *work = context;
+    for (unsigned int i = 0; i < size; ++i) {
+        if (!buffer_write(&work->source, work->source_size, data[i])) {
+            work->no_memory = 1;
+            return 0;
+        }
+        ++work->source_size;
+    }
+    return 1;
+}
+
+static unsigned char source_byte(void *context, unsigned int at)
+{
+    const struct assembly *work = context;
+    return buffer_read(&work->source, at);
+}
+
+static int emit_byte(void *context, unsigned int at, unsigned char byte)
+{
+    struct assembly *work = context;
+    return buffer_write(&work->program, at, byte);
+}
+
+static int read_output(void *context, unsigned char sector[512], unsigned int size)
+{
+    struct assembly *work = context;
+    for (unsigned int i = 0; i < size; ++i) {
+        const unsigned int at = work->written++;
+        sector[i] = at < work->header_size ? work->header[at] :
+            buffer_read(&work->program, at - work->header_size);
+    }
     return 1;
 }
 
 void shell_assemble(unsigned int *row, const unsigned char *argument)
 {
     unsigned char input_name[FAT16_PATH_CAPACITY], output_name[FAT16_PATH_CAPACITY];
-    const int input_length = shell_word(&argument, input_name, sizeof(input_name));
+    unsigned int version = APP_FORMAT_VERSION;
+    int input_length = shell_word(&argument, input_name, sizeof(input_name));
+    if (input_length && shell_equals(input_name, "-f")) {
+        unsigned char format[8];
+        if (!shell_word(&argument, format, sizeof(format)) || !shell_equals(format, "v1.1")) {
+            shell_print_error(row, "Formato de montagem esperado: v1.1");
+            return;
+        }
+        version = APP_V11_VERSION;
+        input_length = shell_word(&argument, input_name, sizeof(input_name));
+    }
     const int output_length = shell_word(&argument, output_name, sizeof(output_name));
     if (!input_length || !output_length || *argument ||
         !file_has_extension((const char *)input_name, ".ASM") ||
         !file_has_extension((const char *)output_name, ".APP")) {
-        shell_print_line(row, "Uso: asm <fonte.asm> <saida.APP>");
-        return;
-    }
-    if (shell_equals(input_name, (const char *)output_name)) {
-        shell_print_line(row, "Escolha outro nome para o executavel");
+        shell_print_line(row, "Uso: asm [-f v1.1] <fonte.asm> <saida.APP>");
         return;
     }
 
@@ -53,32 +114,44 @@ void shell_assemble(unsigned int *row, const unsigned char *argument)
         shell_print_line(row, "Escolha outro nome para o executavel");
         return;
     }
-    if (file.size > SOURCE_LIMIT) {
-        shell_print_number(row, "Limite do fonte: ", SOURCE_LIMIT, " bytes");
+    const unsigned int source_limit = version == APP_V11_VERSION ? ASM_V11_SOURCE_LIMIT : ASM_V1_SOURCE_LIMIT;
+    if (file.size > source_limit) {
+        shell_print_number(row, "Limite do fonte: ", source_limit, " bytes");
         return;
     }
 
-    struct source_reader reader = {0};
-    if (fat16_read(&volume, &file, load_source, &reader) != FAT16_READ_OK) {
-        shell_print_line(row, "Falha ao ler o fonte");
-        return;
+    struct assembly work = {0};
+    if (fat16_read(&volume, &file, load_source, &work) != FAT16_READ_OK) {
+        shell_print_error(row, work.no_memory ? "Sem memoria para o fonte" : "Falha ao ler o fonte");
+        goto done;
     }
-    unsigned int code_size, entry, line;
-    const char *error = app_assemble(source, reader.written, program + APP_HEADER_SIZE,
-        &code_size, &entry, &line);
+    const struct asm_io io = { &work, source_byte, emit_byte };
+    struct app_info info, inspected;
+    unsigned int line;
+    const char *error = app_assemble(&io, work.source_size, version, &info, &line);
     if (error) {
         shell_print_number(row, "Erro na linha ", line, "");
-        shell_print_line(row, error);
-        return;
+        shell_print_error(row, error);
+        goto done;
     }
 
-    app_make_header(program, code_size, entry);
+    work.header_size = info.header_size;
+    app_make_header(work.header, &info);
+    const unsigned int length = info.header_size + info.code_size + info.data_size;
+    if (!app_validate_header(work.header, work.header_size, length, &inspected)) {
+        shell_print_error(row, "Falha ao validar APP montado");
+        goto done;
+    }
     unsigned int size = 0;
     while (output.name[size])
         ++size;
-    const enum fat16_edit_result result =
-        fat16_write_at(&volume, output.directory, output.name, size, program, APP_HEADER_SIZE + code_size);
+    const enum fat16_edit_result result = fat16_write_stream_at(&volume, output.directory,
+        output.name, size, length, read_output, &work);
     shell_report_file_edit(row, result, "APP montado e salvo");
+
+done:
+    release_buffer(&work.program);
+    release_buffer(&work.source);
 }
 
 void shell_appinfo(unsigned int *row, const unsigned char *argument)
@@ -99,14 +172,21 @@ void shell_appinfo(unsigned int *row, const unsigned char *argument)
     struct app_info info;
     const int valid = app_inspect(&volume, &file, &info);
     if (valid <= 0) {
-        shell_print_error(row, valid < 0 ? "Falha ao ler arquivo ou cadeia FAT16" :
+        shell_print_error(row, valid == -2 ? "Versao GTRA incompativel" :
+            valid == -1 ? "Falha ao ler arquivo ou cadeia FAT16" :
             "Formato APP invalido");
         return;
     }
 
-    shell_print_number(row, "Formato GTRA v", APP_FORMAT_VERSION, "");
-    shell_print_number(row, "Cabecalho: ", APP_HEADER_SIZE, " bytes");
-    shell_print_number(row, "Codigo e dados: ", info.image_size, " bytes");
+    const int extended = info.version == APP_V11_VERSION;
+    shell_print_line(row, extended ? "Formato GTRA v1.1" : "Formato GTRA v1");
+    shell_print_number(row, "Cabecalho: ", info.header_size, " bytes");
+    shell_print_number(row, extended ? "Codigo e constantes: " : "Codigo e dados: ", info.code_size, " bytes");
+    if (extended) {
+        shell_print_number(row, "Dados inicializados: ", info.data_size, " bytes");
+        shell_print_number(row, "BSS: ", info.bss_size, " bytes");
+        shell_print_number(row, "Total da imagem: ", info.code_size + info.data_size + info.bss_size, " bytes");
+    }
     char entry[] = "Entrada: 0x0000000000000000";
     shell_hex64(entry + 11, info.entry);
     shell_print_line(row, entry);

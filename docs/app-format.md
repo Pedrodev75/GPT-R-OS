@@ -1,5 +1,7 @@
 # Executáveis .APP do GPT-R OS
 
+Este documento descreve a ABI GTRA v1. Consulte o [formato GTRA v1.1](gtra-v1.1.md) para imagens multipágina, dados graváveis e BSS.
+
 A versão 1 do formato guarda uma imagem plana de código e dados constantes x86-64. O programa deve usar endereçamento relativo à posição e manter dados mutáveis na pilha. O comando `run <arquivo.APP> [argumentos]` carrega e executa essa imagem em ring 3. No desktop, cada execução abre uma janela própria e o escalonador pode manter até quatro janelas de programas abertas.
 
 ## Cabeçalho

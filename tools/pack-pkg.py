@@ -18,6 +18,22 @@ def canonical_name(name):
     return name.upper()
 
 
+def validate_app(app):
+    if len(app) < 8:
+        raise ValueError("invalid principal GTRA size")
+    magic, version, header = struct.unpack_from("<4sHH", app)
+    if magic == b"GTRA" and (version, header) == (1, 32) and 32 < len(app) <= 4128:
+        size, entry = struct.unpack_from("<II", app, 8)
+        if size == len(app) - header and entry < size and not any(app[16:32]):
+            return
+    if magic == b"GTRA" and (version, header) == (0x0101, 64) and 64 < len(app) <= 65600:
+        code, code_size, data, data_size, bss, entry = struct.unpack_from("<6I", app, 8)
+        if (code == header and data == code + code_size and data + data_size == len(app)
+                and code_size + data_size + bss <= 65536 and entry < code_size and not any(app[32:64])):
+            return
+    raise ValueError("invalid principal GTRA header or size")
+
+
 def make_package(package_id, name, version, description, main, files):
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,8}", package_id):
         raise ValueError("invalid package ID")
@@ -48,12 +64,7 @@ def make_package(package_id, name, version, description, main, files):
         payload.append(data)
         remaining -= len(data)
     entry = names.index(principal)
-    app = payload[entry]
-    if not 33 <= len(app) <= 4128:
-        raise ValueError("invalid principal GTRA size")
-    magic, abi, header, size, start = struct.unpack_from("<4sHHII", app)
-    if (magic, abi, header, size) != (b"GTRA", 1, 32, len(app) - 32) or start >= size or any(app[16:32]):
-        raise ValueError("invalid principal GTRA header")
+    validate_app(payload[entry])
     table = b"".join(
         struct.pack("<12sII", file.name.encode("ascii"), len(data), zlib.crc32(data))
         for file, data in zip(files, payload)

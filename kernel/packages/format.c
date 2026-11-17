@@ -206,7 +206,7 @@ enum pkg_status pkg_parse(const struct pkg_source *source, struct pkg_manifest *
     }
     const struct pkg_entry *app = &pkg->files[main];
     if (!file_has_extension(app->name, ".APP") || app->size <= APP_HEADER_SIZE ||
-        app->size > APP_HEADER_SIZE + APP_IMAGE_LIMIT)
+        app->size > APP_FILE_MAX)
         return PKG_APP;
     return metadata || offset == source->size ? PKG_OK : PKG_FORMAT;
 }
@@ -243,9 +243,15 @@ enum pkg_status pkg_validate(const struct pkg_source *source, struct pkg_manifes
             return status;
     }
     struct app_info info;
-    unsigned char header[APP_HEADER_SIZE];
+    unsigned char header[APP_V11_HEADER_SIZE];
     const struct pkg_entry *app = &pkg->files[pkg->main];
-    if (!source->read(source->context, app->offset, header, sizeof(header)))
+    if (!source->read(source->context, app->offset, header, APP_HEADER_PREFIX))
         return PKG_IO;
-    return app_validate_header(header, app->size, &info) ? PKG_OK : PKG_APP;
+    const int size = app_header_size(header, APP_HEADER_PREFIX);
+    if (size <= 0 || (unsigned int)size >= app->size)
+        return PKG_APP;
+    if (!source->read(source->context, app->offset + APP_HEADER_PREFIX, header + APP_HEADER_PREFIX,
+        (unsigned int)size - APP_HEADER_PREFIX))
+        return PKG_IO;
+    return app_validate_header(header, (unsigned int)size, app->size, &info) ? PKG_OK : PKG_APP;
 }

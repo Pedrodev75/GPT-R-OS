@@ -5,13 +5,18 @@
 #include "../drivers/timer.h"
 
 enum {
-    USER_IMAGE = 0x80000000u,
-    USER_STACK = USER_IMAGE + 2 * PAGE_SIZE,
-    USER_HEAP_SLOT = 4, USER_HEAP = USER_IMAGE + USER_HEAP_SLOT * PAGE_SIZE,
-    APP_HEAP_PAGES = 64,
-    USER_PDPT_SLOT = USER_IMAGE >> 30,
+    APP_HEAP_PAGES = 64, APP_V11_STACK_PAGES = 4,
+    APP_SEGMENT_PAGES = APP_V11_IMAGE_LIMIT / PAGE_SIZE,
+    USER_WINDOW_PAGES = (APP_V11_HEAP_BASE - APP_CODE_BASE) / PAGE_SIZE + APP_HEAP_PAGES,
+    USER_PDPT_SLOT = APP_CODE_BASE >> 30,
     PRESENT = 1, WRITABLE = 2, USER = 4
 };
+
+#define APP_V1_STACK_BASE (APP_CODE_BASE + 2 * PAGE_SIZE)
+#define APP_V1_HEAP_BASE (APP_CODE_BASE + 4 * PAGE_SIZE)
+#define PAGE_NX (1ull << 63)
+
+_Static_assert(USER_WINDOW_PAGES < 512, "User layout exceeds the page table");
 
 struct task_state {
     unsigned int reserved0;
@@ -46,6 +51,11 @@ static unsigned long long stack_page_flags;
 
 enum process_state { UNUSED, READY, WAITING, WAITING_OUTPUT, WAITING_CLICK, WAITING_IO, FINISHED };
 
+struct image_pages {
+    unsigned char *code[APP_SEGMENT_PAGES], *data[APP_SEGMENT_PAGES], *stack[APP_V11_STACK_PAGES];
+    unsigned int code_count, data_count, stack_count;
+};
+
 struct process {
     struct app_frame frame;
     unsigned char fpu[512] __attribute__((aligned(16)));
@@ -53,10 +63,11 @@ struct process {
     unsigned int pid;
     unsigned int started_at, stopped_at, cpu_ticks;
     unsigned int executable_directory, executable_volume;
-    unsigned char *image, *stack;
+    struct app_info info;
+    struct image_pages image;
     unsigned char *heap_pages[APP_HEAP_PAGES];
     unsigned char heap_runs[APP_HEAP_PAGES];
-    unsigned int image_size, read_capacity;
+    unsigned int read_capacity;
     unsigned int output_offset;
     unsigned long long read_address;
     int (*output)(void *, const unsigned char *, unsigned int);
@@ -82,7 +93,7 @@ static unsigned long long enable_nx(void)
         return 0;
     __asm__ volatile ("rdmsr" : "=a"(eax), "=d"(edx) : "c"(0xc0000080u));
     __asm__ volatile ("wrmsr" : : "a"(eax | (1u << 11)), "d"(edx), "c"(0xc0000080u) : "memory");
-    return 1ull << 63;
+    return PAGE_NX;
 }
 
 void app_init(void)
@@ -116,58 +127,140 @@ void app_init(void)
     __asm__ volatile ("mov %0, %%cr0; mov %1, %%cr4" : : "r"(cr0), "r"(cr4) : "memory");
 }
 
-struct image_reader {
-    unsigned char header[APP_HEADER_SIZE];
-    unsigned char *image;
-    unsigned int size;
-};
-
-static int collect_image(void *context, const unsigned char *data, unsigned int size)
+static unsigned long long stack_base(const struct app_info *info)
 {
-    struct image_reader *reader = context;
-    for (unsigned int i = 0; i < size; ++i) {
-        const unsigned int at = reader->size++;
-        if (at < APP_HEADER_SIZE)
-            reader->header[at] = data[i];
-        else if (reader->image && at < APP_HEADER_SIZE + APP_IMAGE_LIMIT)
-            reader->image[at - APP_HEADER_SIZE] = data[i];
+    return info->version == APP_V11_VERSION ? APP_V11_STACK_BASE : APP_V1_STACK_BASE;
+}
+
+static unsigned long long heap_base(const struct process *process)
+{
+    return process->info.version == APP_V11_VERSION ? APP_V11_HEAP_BASE : APP_V1_HEAP_BASE;
+}
+
+static int allocate_pages(unsigned char **pages, unsigned int *count, unsigned int bytes)
+{
+    const unsigned int needed = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    while (*count < needed) {
+        unsigned char *page = page_alloc();
+        if (!page)
+            return 0;
+        for (unsigned int i = 0; i < PAGE_SIZE; ++i)
+            page[i] = 0;
+        pages[(*count)++] = page;
     }
     return 1;
 }
 
-static int read_image(const struct fat16_volume *volume, const struct fat16_file *file,
-    unsigned char *image, struct app_info *info)
+static void release_pages(unsigned char **pages, unsigned int *count)
 {
-    if (file->size <= APP_HEADER_SIZE || file->size > APP_HEADER_SIZE + APP_IMAGE_LIMIT)
+    while (*count) {
+        const unsigned int index = --*count;
+        page_free(pages[index]);
+        pages[index] = 0;
+    }
+}
+
+static void free_image(struct image_pages *image)
+{
+    release_pages(image->stack, &image->stack_count);
+    release_pages(image->data, &image->data_count);
+    release_pages(image->code, &image->code_count);
+}
+
+struct image_reader {
+    unsigned char header[APP_V11_HEADER_SIZE];
+    unsigned int position, file_size;
+    struct app_info info;
+    struct image_pages *image;
+    enum app_status status;
+};
+
+static void copy_image_bytes(struct image_reader *reader, const unsigned char *in, unsigned int size)
+{
+    unsigned int at = reader->position - reader->info.header_size;
+    while (size) {
+        const int code = at < reader->info.code_size;
+        const unsigned int offset = code ? at : at - reader->info.code_size;
+        unsigned char **pages = code ? reader->image->code : reader->image->data;
+        const unsigned int remaining = (code ? reader->info.code_size : reader->info.data_size) - offset;
+        const unsigned int room = PAGE_SIZE - offset % PAGE_SIZE;
+        unsigned int count = size < room ? size : room;
+        if (count > remaining)
+            count = remaining;
+        unsigned char *out = pages[offset / PAGE_SIZE] + offset % PAGE_SIZE;
+        for (unsigned int i = 0; i < count; ++i)
+            out[i] = in[i];
+        in += count;
+        at += count;
+        size -= count;
+    }
+}
+
+static int collect_image(void *context, const unsigned char *data, unsigned int size)
+{
+    struct image_reader *reader = context;
+    if (size > reader->file_size - reader->position) {
+        reader->status = APP_INVALID;
         return 0;
-    struct image_reader reader = { .image = image };
-    if (fat16_read(volume, file, collect_image, &reader) != FAT16_READ_OK)
-        return -1;
-    if (reader.size != file->size || !app_validate_header(reader.header, file->size, info))
-        return 0;
+    }
+    while (size && reader->status != APP_STARTED) {
+        reader->header[reader->position++] = *data++;
+        --size;
+        if (reader->position < APP_HEADER_PREFIX)
+            continue;
+        const int header_size = app_header_size(reader->header, reader->position);
+        if (header_size <= 0 || (unsigned int)header_size >= reader->file_size) {
+            reader->status = header_size == -2 ? APP_BAD_VERSION : APP_INVALID;
+            return 0;
+        }
+        if (reader->position < (unsigned int)header_size)
+            continue;
+        if (!app_validate_header(reader->header, reader->position, reader->file_size, &reader->info))
+            return 0;
+        if (reader->image) {
+            const struct app_info *info = &reader->info;
+            struct image_pages *image = reader->image;
+            if (info->version == APP_V11_VERSION && !(stack_page_flags & PAGE_NX)) {
+                reader->status = APP_NO_NX;
+                return 0;
+            }
+            if (!allocate_pages(image->code, &image->code_count, info->code_size) ||
+                !allocate_pages(image->data, &image->data_count, info->data_size + info->bss_size)) {
+                reader->status = APP_NO_MEMORY;
+                return 0;
+            }
+        }
+        reader->status = APP_STARTED;
+    }
+    if (size && reader->image)
+        copy_image_bytes(reader, data, size);
+    reader->position += size;
     return 1;
+}
+
+static enum app_status read_image(const struct fat16_volume *volume, const struct fat16_file *file,
+    struct image_pages *image, struct app_info *info)
+{
+    if (file->size <= APP_HEADER_SIZE || file->size > APP_FILE_MAX)
+        return APP_INVALID;
+    struct image_reader reader = { .image = image, .file_size = file->size, .status = APP_INVALID };
+    const enum fat16_read_result status = fat16_read(volume, file, collect_image, &reader);
+    if (status == FAT16_READ_ERROR)
+        return APP_READ_ERROR;
+    if (reader.status != APP_STARTED)
+        return reader.status;
+    if (status != FAT16_READ_OK || reader.position != file->size)
+        return APP_INVALID;
+    *info = reader.info;
+    return APP_STARTED;
 }
 
 int app_inspect(const struct fat16_volume *volume, const struct fat16_file *file,
     struct app_info *info)
 {
-    return read_image(volume, file, 0, info);
-}
-
-void app_make_header(unsigned char *header, unsigned int size, unsigned int entry)
-{
-    for (unsigned int i = 0; i < APP_HEADER_SIZE; ++i)
-        header[i] = 0;
-    header[0] = 'G';
-    header[1] = 'T';
-    header[2] = 'R';
-    header[3] = 'A';
-    header[4] = APP_FORMAT_VERSION;
-    header[6] = APP_HEADER_SIZE;
-    for (unsigned int i = 0; i < 4; ++i) {
-        header[8 + i] = size >> (i * 8);
-        header[12 + i] = entry >> (i * 8);
-    }
+    const enum app_status result = read_image(volume, file, 0, info);
+    return result == APP_STARTED ? 1 : result == APP_READ_ERROR ? -1 :
+        result == APP_BAD_VERSION ? -2 : 0;
 }
 
 static void flush_tlb(void)
@@ -177,7 +270,7 @@ static void flush_tlb(void)
 }
 
 static unsigned long long build_user_stack(unsigned char *stack,
-    const struct app_launch *launch)
+    unsigned long long last_page, const struct app_launch *launch)
 {
     if (!launch->argc || launch->argc > APP_ARG_LIMIT ||
         !launch->args_size || launch->args_size > APP_ARG_BYTES)
@@ -190,7 +283,7 @@ static unsigned long long build_user_stack(unsigned char *stack,
     unsigned int copied = 0;
     frame[0] = launch->argc;
     for (unsigned int i = 0; i < launch->argc; ++i) {
-        frame[i + 1] = USER_STACK + strings_at + copied;
+        frame[i + 1] = last_page + strings_at + copied;
         unsigned char ch;
         do {
             if (copied == launch->args_size)
@@ -200,7 +293,7 @@ static unsigned long long build_user_stack(unsigned char *stack,
         } while (ch);
     }
     frame[launch->argc + 1] = 0;
-    return copied == launch->args_size ? USER_STACK + frame_at : 0;
+    return copied == launch->args_size ? last_page + frame_at : 0;
 }
 
 static void release_resources(struct process *process)
@@ -215,11 +308,15 @@ static void release_resources(struct process *process)
         process->heap_pages[i] = 0;
         process->heap_runs[i] = 0;
     }
-    if (process->image) {
-        page_free(process->stack);
-        page_free(process->image);
-        process->stack = process->image = 0;
-    }
+    free_image(&process->image);
+}
+
+static void map_pages(unsigned long long base, unsigned char *const *pages,
+    unsigned int count, unsigned long long flags)
+{
+    const unsigned int first = (base - APP_CODE_BASE) / PAGE_SIZE;
+    for (unsigned int i = 0; i < count; ++i)
+        table[first + i] = pages[i] ? (unsigned long long)pages[i] | flags : 0;
 }
 
 static void dispatch(struct process *process)
@@ -230,12 +327,13 @@ static void dispatch(struct process *process)
     __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) : : "memory");
 
     /* Only this process's leaf mappings are user-accessible. */
-    table[0] = (unsigned long long)process->image | PRESENT | USER;
-    table[2] = (unsigned long long)process->stack | stack_page_flags;
-    for (unsigned int i = 0; i < APP_HEAP_PAGES; ++i) {
-        const unsigned long long page = (unsigned long long)process->heap_pages[i];
-        table[USER_HEAP_SLOT + i] = page ? page | stack_page_flags : 0;
-    }
+    for (unsigned int i = 0; i < USER_WINDOW_PAGES; ++i)
+        table[i] = 0;
+    const struct image_pages *image = &process->image;
+    map_pages(APP_CODE_BASE, image->code, image->code_count, PRESENT | USER);
+    map_pages(APP_V11_DATA_BASE, image->data, image->data_count, stack_page_flags);
+    map_pages(stack_base(&process->info), image->stack, image->stack_count, stack_page_flags);
+    map_pages(heap_base(process), process->heap_pages, APP_HEAP_PAGES, stack_page_flags);
     pml4[0] |= USER;
     pdpt[USER_PDPT_SLOT] = (unsigned long long)directory | PRESENT | WRITABLE | USER;
     flush_tlb();
@@ -278,7 +376,7 @@ struct app_task_info app_task_info(unsigned int slot)
          process->state == WAITING_IO) ? APP_TASK_WAITING : APP_TASK_FINISHED;
     if (!process->pid)
         return (struct app_task_info){0};
-    unsigned int pages = process->image ? 2 : 0;
+    unsigned int pages = process->image.code_count + process->image.data_count + process->image.stack_count;
     if (pages) {
         for (unsigned int i = 0; i < APP_HEAP_PAGES; ++i)
             pages += process->heap_pages[i] != 0;
@@ -297,50 +395,41 @@ enum app_status app_start(unsigned int slot, const struct fat16_volume *volume,
     struct process *process = &processes[slot];
     if (process->state != UNUSED)
         return APP_LIMIT;
-    if (file->size <= APP_HEADER_SIZE || file->size > APP_HEADER_SIZE + APP_IMAGE_LIMIT)
-        return APP_INVALID;
-    unsigned char *image = page_alloc();
-    if (!image)
-        return APP_NO_MEMORY;
-
-    for (unsigned int i = 0; i < PAGE_SIZE; ++i)
-        image[i] = 0;
+    struct image_pages image = {0};
     struct app_info info;
-    const int valid = read_image(volume, file, image, &info);
-    enum app_status failure = valid < 0 ? APP_READ_ERROR : APP_INVALID;
-    if (valid > 0) {
-        unsigned char *stack = page_alloc();
-        if (stack) {
-            for (unsigned int i = 0; i < PAGE_SIZE; ++i)
-                stack[i] = 0;
-            const unsigned long long rsp = build_user_stack(stack, launch);
-            if (rsp) {
-                *process = (struct process){
-                    .frame = { .rip = USER_IMAGE + info.entry, .cs = 0x23,
-                        .flags = 0x202, .rsp = rsp, .ss = 0x1b },
-                    .state = READY, .pid = allocate_pid(), .image = image, .stack = stack, .image_size = info.image_size,
-                    .started_at = timer_ticks(),
-                    .executable_directory = launch->executable_directory,
-                    .executable_volume = volume->fat_start,
-                    .headless = slot >= APP_PROCESS_LIMIT,
-                    .output = launch->output, .context = launch->context
-                };
-                app_files_begin(slot, volume, launch->directory);
-                /* FXSAVE layout: x87 control word 0x037f, MXCSR 0x1f80. */
-                process->fpu[0] = 0x7f;
-                process->fpu[1] = 0x03;
-                process->fpu[24] = 0x80;
-                process->fpu[25] = 0x1f;
-                return APP_STARTED;
-            }
-            page_free(stack);
-            failure = APP_BAD_ARGS;
-        } else {
-            failure = APP_NO_MEMORY;
-        }
+    enum app_status result = read_image(volume, file, &image, &info);
+    if (result != APP_STARTED)
+        goto fail;
+    const unsigned int stack_pages = info.version == APP_V11_VERSION ? APP_V11_STACK_PAGES : 1;
+    if (!allocate_pages(image.stack, &image.stack_count, stack_pages * PAGE_SIZE)) {
+        result = APP_NO_MEMORY;
+        goto fail;
     }
-    page_free(image);
-    return failure;
+    const unsigned long long last_page = stack_base(&info) + (stack_pages - 1) * PAGE_SIZE;
+    const unsigned long long rsp = build_user_stack(image.stack[stack_pages - 1], last_page, launch);
+    if (!rsp) {
+        result = APP_BAD_ARGS;
+        goto fail;
+    }
+    *process = (struct process){
+        .frame = { .rip = APP_CODE_BASE + info.entry, .cs = 0x23,
+            .flags = 0x202, .rsp = rsp, .ss = 0x1b },
+        .state = READY, .pid = allocate_pid(), .image = image, .info = info,
+        .started_at = timer_ticks(), .executable_directory = launch->executable_directory,
+        .executable_volume = volume->fat_start, .headless = slot >= APP_PROCESS_LIMIT,
+        .output = launch->output, .context = launch->context
+    };
+    app_files_begin(slot, volume, launch->directory);
+    /* FXSAVE layout: x87 control word 0x037f, MXCSR 0x1f80. */
+    process->fpu[0] = 0x7f;
+    process->fpu[1] = 0x03;
+    process->fpu[24] = 0x80;
+    process->fpu[25] = 0x1f;
+    return APP_STARTED;
+
+fail:
+    free_image(&image);
+    return result;
 }
 
 int app_ready(void)
@@ -383,27 +472,34 @@ static int contains(unsigned long long address, unsigned long long length,
 static int user_range(const struct process *process, unsigned long long address,
     unsigned long long length, int writable)
 {
-    if (contains(address, length, USER_STACK, PAGE_SIZE) ||
-        (!writable && contains(address, length, USER_IMAGE, process->image_size)))
+    const struct app_info *info = &process->info;
+    const unsigned int data_size = info->data_size + info->bss_size;
+    if (contains(address, length, stack_base(info), process->image.stack_count * PAGE_SIZE) ||
+        (!writable && contains(address, length, APP_CODE_BASE, info->code_size)) ||
+        (data_size && contains(address, length, APP_V11_DATA_BASE, data_size)))
         return 1;
-    if (!contains(address, length, USER_HEAP, APP_HEAP_PAGES * PAGE_SIZE) ||
-        address == USER_HEAP + APP_HEAP_PAGES * PAGE_SIZE)
+    const unsigned long long heap = heap_base(process);
+    if (!contains(address, length, heap, APP_HEAP_PAGES * PAGE_SIZE) ||
+        address == heap + APP_HEAP_PAGES * PAGE_SIZE)
         return 0;
-    unsigned int start = (address - USER_HEAP) / PAGE_SIZE;
+    unsigned int start = (address - heap) / PAGE_SIZE;
     while (start && !process->heap_runs[start])
         --start;
     return process->heap_runs[start] &&
-        contains(address, length, USER_HEAP + start * PAGE_SIZE, process->heap_runs[start] * PAGE_SIZE);
+        contains(address, length, heap + start * PAGE_SIZE, process->heap_runs[start] * PAGE_SIZE);
 }
 
 static unsigned char *user_page(const struct process *process, unsigned long long address)
 {
-    const unsigned int page = (address - USER_IMAGE) / PAGE_SIZE;
-    if (page == 0)
-        return process->image;
-    if (page == 2)
-        return process->stack;
-    return process->heap_pages[page - USER_HEAP_SLOT];
+    const unsigned long long stack = stack_base(&process->info);
+    const unsigned long long heap = heap_base(process);
+    if (address >= heap)
+        return process->heap_pages[(address - heap) / PAGE_SIZE];
+    if (address >= stack)
+        return process->image.stack[(address - stack) / PAGE_SIZE];
+    if (address >= APP_V11_DATA_BASE)
+        return process->image.data[(address - APP_V11_DATA_BASE) / PAGE_SIZE];
+    return process->image.code[(address - APP_CODE_BASE) / PAGE_SIZE];
 }
 
 /* Disk operations run with the user page tables detached. */
@@ -504,25 +600,25 @@ static long long allocate_user(struct process *process, unsigned long long bytes
         return APP_ERR_MEMORY;
     }
     process->heap_runs[first] = count;
-    for (i = 0; i < count; ++i)
-        table[USER_HEAP_SLOT + first + i] =
-            (unsigned long long)process->heap_pages[first + i] | stack_page_flags;
+    const unsigned long long start = heap_base(process) + first * PAGE_SIZE;
+    map_pages(start, process->heap_pages + first, count, stack_page_flags);
     flush_tlb();
-    return USER_HEAP + first * PAGE_SIZE;
+    return start;
 }
 
 static long long free_user(struct process *process, unsigned long long address)
 {
-    if (address < USER_HEAP || address >= USER_HEAP + APP_HEAP_PAGES * PAGE_SIZE ||
+    const unsigned long long heap = heap_base(process);
+    if (address < heap || address >= heap + APP_HEAP_PAGES * PAGE_SIZE ||
         address % PAGE_SIZE)
         return APP_ERR_INVALID;
-    const unsigned int first = (address - USER_HEAP) / PAGE_SIZE;
+    const unsigned int first = (address - heap) / PAGE_SIZE;
     const unsigned int count = process->heap_runs[first];
     if (!count)
         return APP_ERR_INVALID;
     process->heap_runs[first] = 0;
     for (unsigned int i = first; i < first + count; ++i)
-        table[USER_HEAP_SLOT + i] = 0;
+        table[(heap - APP_CODE_BASE) / PAGE_SIZE + i] = 0;
     flush_tlb();
     for (unsigned int i = first; i < first + count; ++i) {
         page_free(process->heap_pages[i]);
