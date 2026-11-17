@@ -1,5 +1,6 @@
 #include "app.h"
 #include "app_files.h"
+#include "assembler.h"
 #include "../desktop/app_canvas.h"
 #include "../memory/pages.h"
 #include "../drivers/timer.h"
@@ -542,7 +543,15 @@ static void service_file(struct process *process)
     struct app_frame *frame = &process->frame;
     const unsigned long long number = frame->rax, handle = frame->rdi;
     long long result = APP_ERR_INVALID;
-    if (number == APP_SYS_OPEN) {
+    if (number == APP_SYS_ASSEMBLE) {
+        unsigned char source[FAT16_PATH_CAPACITY], target[FAT16_PATH_CAPACITY];
+        struct asm_diagnostic diagnostic = {0};
+        const unsigned long long version = frame->rdx;
+        if ((version == APP_FORMAT_VERSION || version == APP_V11_VERSION) &&
+            read_path(process, handle, source) && read_path(process, frame->rsi, target))
+            result = app_file_assemble(slot, source, target, (unsigned int)version, &diagnostic);
+        frame->rdx = diagnostic.line;
+    } else if (number == APP_SYS_OPEN) {
         unsigned char path[FAT16_PATH_CAPACITY];
         if (frame->rsi <= APP_FILE_WRITE_MODE && read_path(process, handle, path))
             result = app_file_open(slot, path, frame->rsi);
@@ -713,7 +722,7 @@ void app_syscall(struct app_frame *frame)
         frame->rax = free_user(running, argument);
         return;
     }
-    if (number >= APP_SYS_OPEN && number <= APP_SYS_CLOSE) {
+    if (number >= APP_SYS_OPEN && number <= APP_SYS_ASSEMBLE) {
         running->frame = *frame;
         running->frame.rax = number;
         running->state = WAITING_IO;

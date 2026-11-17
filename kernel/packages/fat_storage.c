@@ -23,7 +23,7 @@ static enum pkg_status edit_status(enum fat16_edit_result status)
     switch (status) {
     case FAT16_EDIT_OK: case FAT16_EDIT_CLEANUP: return PKG_OK;
     case FAT16_EDIT_FULL: case FAT16_EDIT_SIZE: return PKG_FULL;
-    case FAT16_EDIT_IO: case FAT16_EDIT_PARTIAL: return PKG_IO;
+    case FAT16_EDIT_IO: case FAT16_EDIT_PARTIAL: case FAT16_EDIT_UNCERTAIN: return PKG_IO;
     default: return PKG_CONFLICT;
     }
 }

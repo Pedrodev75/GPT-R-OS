@@ -35,6 +35,7 @@ int fat16_dir_changed(unsigned int directory, unsigned int since)
 
 struct edit_entry {
     unsigned int index, lba, next_lba, tail, directory;
+    unsigned int extension, previous_end;
     unsigned int first_cluster;
     unsigned int size;
     int exists;
@@ -281,8 +282,16 @@ static enum fat16_edit_result prepare_slot(const struct fat16_volume *vol,
         return FAT16_EDIT_IO;
     if (!next)
         return FAT16_EDIT_FULL;
-    if (!init_cluster(vol, next, 0) || !fat_set(vol, entry->tail, end, next))
+    if (!init_cluster(vol, next, 0))
         return FAT16_EDIT_IO;
+    if (!fat_set(vol, entry->tail, end, next)) {
+        unsigned int link;
+        if (fat16_get_link(vol, entry->tail, &link) && link == end)
+            fat_set(vol, next, FAT16_END, 0);
+        return FAT16_EDIT_IO;
+    }
+    entry->extension = next;
+    entry->previous_end = end;
     entry->lba = fat16_cluster_lba(vol, next);
     entry->index = 0;
     return FAT16_EDIT_OK;
@@ -305,11 +314,15 @@ static void write_entry(unsigned char *slot, const unsigned char *alias,
 
 static int update_directory(const struct fat16_volume *vol,
     const struct edit_entry *entry, const struct short_name *name,
-    unsigned int cluster, unsigned int length, unsigned char attr)
+    unsigned int cluster, unsigned int length, unsigned char attr, int *unchanged)
 {
-    unsigned char sector[512];
+    unsigned char sector[512], original[512], next[512];
+    unsigned char previous_end = EMPTY_SLOT;
     if (!ata_read_sector(vol->disk, entry->lba, sector))
         return 0;
+    if (unchanged)
+        for (unsigned int i = 0; i < sizeof(original); ++i)
+            original[i] = sector[i];
     unsigned char *slot = sector + (entry->index % 16) * 32;
     unsigned char old_alias[11];
     if (!name) {
@@ -325,20 +338,35 @@ static int update_directory(const struct fat16_volume *vol,
             if (entry->index % 16 != 15) {
                 slot[32] = EMPTY_SLOT;
             } else if (entry->next_lba) {
-                unsigned char next[512];
                 if (!ata_read_sector(vol->disk, entry->next_lba, next))
                     return 0;
                 if (next[0] != EMPTY_SLOT) {
+                    previous_end = next[0];
                     next[0] = EMPTY_SLOT;
-                    if (!ata_write_sector(vol->disk, entry->next_lba, next))
+                    if (!ata_write_sector(vol->disk, entry->next_lba, next)) {
+                        if (unchanged) {
+                            next[0] = previous_end;
+                            ata_write_sector(vol->disk, entry->next_lba, next);
+                        }
                         return 0;
+                    }
                 }
             }
         }
         write_entry(slot, name->alias, name->lower, attr, cluster, length);
     }
     record_change(entry->directory, name ? name->alias : old_alias);
-    return ata_write_sector(vol->disk, entry->lba, sector);
+    if (ata_write_sector(vol->disk, entry->lba, sector))
+        return 1;
+    if (unchanged) {
+        /* A failed flush can leave the new directory entry visible. Restore it before freeing either chain. */
+        *unchanged = ata_write_sector(vol->disk, entry->lba, original);
+        if (*unchanged && previous_end != EMPTY_SLOT) {
+            next[0] = previous_end;
+            ata_write_sector(vol->disk, entry->next_lba, next);
+        }
+    }
+    return 0;
 }
 
 enum fat16_edit_result fat16_mkdir(const struct fat16_volume *vol, unsigned int directory,
@@ -364,7 +392,7 @@ enum fat16_edit_result fat16_mkdir(const struct fat16_volume *vol, unsigned int 
     write_entry(first_sector, (const unsigned char *)".          ", 0, 0x10, cluster, 0);
     write_entry(first_sector + 32, (const unsigned char *)"..         ", 0, 0x10, directory, 0);
     if (!init_cluster(vol, cluster, first_sector) ||
-        !update_directory(vol, &entry, &name, cluster, 0, 0x10))
+        !update_directory(vol, &entry, &name, cluster, 0, 0x10, 0))
         return FAT16_EDIT_IO;
     return FAT16_EDIT_OK;
 }
@@ -411,9 +439,8 @@ static enum fat16_edit_result write_source(const struct fat16_volume *vol, unsig
         return result;
     if (!entry.exists && !(flags & WRITE_ORIGINAL_NAME) && uppercase_txt(&name))
         return FAT16_EDIT_TEXT_EXTENSION;
-    result = prepare_slot(vol, &entry);
-    if (result != FAT16_EDIT_OK)
-        return result;
+    if (!entry.lba && !entry.tail)
+        return FAT16_EDIT_FULL;
     if (entry.exists && !valid_chain(vol, &entry))
         return FAT16_EDIT_IO;
 
@@ -469,13 +496,21 @@ static enum fat16_edit_result write_source(const struct fat16_volume *vol, unsig
         return result;
     }
 
+    result = prepare_slot(vol, &entry);
+    if (result != FAT16_EDIT_OK) {
+        if (!release_chain(vol, cluster))
+            return FAT16_EDIT_IO;
+        return result;
+    }
+
     /* Publish the new chain before releasing the old one. */
-    if (!update_directory(vol, &entry, &name, cluster, length, 0x20)) {
-        /* Release the chain only if the directory still points elsewhere. */
-        unsigned char sector[512];
-        if (cluster && ata_read_sector(vol->disk, entry.lba, sector) &&
-            get16(sector + (entry.index % 16) * 32 + 26) != cluster)
-            release_chain(vol, cluster);
+    int unchanged = 1;
+    if (!update_directory(vol, &entry, &name, cluster, length, 0x20, &unchanged)) {
+        if (!unchanged)
+            return FAT16_EDIT_UNCERTAIN;
+        release_chain(vol, cluster);
+        if (entry.extension && fat_set(vol, entry.tail, entry.extension, entry.previous_end))
+            fat_set(vol, entry.extension, FAT16_END, 0);
         return FAT16_EDIT_IO;
     }
     if (entry.exists && !release_chain(vol, entry.first_cluster))
@@ -539,7 +574,7 @@ enum fat16_edit_result fat16_remove_at(const struct fat16_volume *vol, unsigned 
         return result;
     if (!entry.exists)
         return FAT16_EDIT_MISSING;
-    if (!valid_chain(vol, &entry) || !update_directory(vol, &entry, 0, 0, 0, 0))
+    if (!valid_chain(vol, &entry) || !update_directory(vol, &entry, 0, 0, 0, 0, 0))
         return FAT16_EDIT_IO;
     return release_chain(vol, entry.first_cluster) ? FAT16_EDIT_OK : FAT16_EDIT_CLEANUP;
 }
@@ -639,7 +674,7 @@ static enum fat16_edit_result transfer_file(const struct fat16_volume *vol,
         flags | WRITE_EXCLUSIVE);
     if (result != FAT16_EDIT_OK || !move)
         return result;
-    if (!update_directory(vol, &origin, 0, 0, 0, 0))
+    if (!update_directory(vol, &origin, 0, 0, 0, 0, 0))
         return FAT16_EDIT_PARTIAL;
     return release_chain(vol, origin.first_cluster) ? FAT16_EDIT_OK : FAT16_EDIT_CLEANUP;
 }

@@ -70,6 +70,8 @@ inicio:
 
 A Central aceita executáveis principais v1 ou v1.1 em GTRP v1. O teto do pacote continua em 256 KiB. Para gerar um executável fora do GPT-R OS, `Pack-App.ps1` recebe `-Format v1.1`, `-InputPath` para código, `-DataPath` opcional, `-BssSize` e `-EntryOffset`. Sem a opção de formato, gera v1. O teto de 64 KiB por handle de gravação GTRA continua igual. Um executável v1.1 com o máximo de código e dados em disco ocupa 65.600 bytes.
 
+Aplicativos podem montar um `.ASM` em `.APP` pela [syscall 15](assembly-service.md).
+
 ## Argumentos do Terminal
 
 Em `run programa.APP "dois termos" "" "a|b>c"`, chegam três argumentos depois de `argv[0]`. O segundo está vazio. Pipe e redirecionamento só operam fora das aspas de um argumento. Dentro das aspas, `\"` representa uma aspa e `\\` uma barra invertida. Fora delas, `\|` e `\>` preservam os caracteres como texto. Aspas abertas no fim da linha geram erro antes da execução.

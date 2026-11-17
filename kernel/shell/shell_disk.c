@@ -736,7 +736,8 @@ const char *shell_file_error(enum fat16_edit_result result)
         [FAT16_EDIT_IO] = "Falha de disco ou FAT inconsistente",
         [FAT16_EDIT_CLEANUP] = "Concluido. Falha ao liberar clusters antigos",
         [FAT16_EDIT_EXISTS] = "O destino ja existe",
-        [FAT16_EDIT_PARTIAL] = "Destino salvo. Falha ao remover a origem"
+        [FAT16_EDIT_PARTIAL] = "Destino salvo. Falha ao remover a origem",
+        [FAT16_EDIT_UNCERTAIN] = "Falha de disco. Estado do destino incerto"
     };
     return result > FAT16_EDIT_OK && (unsigned int)result < sizeof(errors) / sizeof(errors[0]) ?
         errors[result] : 0;

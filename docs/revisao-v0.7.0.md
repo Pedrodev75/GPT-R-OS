@@ -40,7 +40,8 @@ Para repetir o teste de integridade com um compilador C11 que aceite os atributo
 ```sh
 mkdir -p build
 cc -std=c11 -I. tests/fat16_integrity.c kernel/fs/fat16.c \
-  kernel/fs/fat16_write.c kernel/fs/fat16_path.c kernel/apps/app_files.c \
+  kernel/fs/fat16_write.c kernel/fs/fat16_path.c kernel/apps/app_files.c kernel/apps/assembly_file.c \
+  kernel/apps/assembler.c kernel/apps/app_format.c \
   -o build/fat16-integrity
 ./build/fat16-integrity
 ```

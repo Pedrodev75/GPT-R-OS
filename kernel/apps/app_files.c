@@ -1,5 +1,6 @@
 #include "app_files.h"
 #include "app.h"
+#include "assembler.h"
 #include "../memory/pages.h"
 
 enum { BUFFER_PAGES = APP_FILE_LIMIT / PAGE_SIZE, HANDLE_BASE = 3 };
@@ -55,14 +56,14 @@ static int equal_alias(const unsigned char *a, const unsigned char *b)
     return *a == *b;
 }
 
-static int output_in_use(const struct file_table *table, const struct fat16_location *entry)
+int app_file_in_use(const struct fat16_volume *volume, const struct fat16_location *entry, int writers_only)
 {
     for (unsigned int slot = 0; slot < APP_PROCESS_SLOTS; ++slot) {
-        if (table->volume.fat_start != tables[slot].volume.fat_start)
+        if (volume->fat_start != tables[slot].volume.fat_start)
             continue;
         for (unsigned int i = 0; i < APP_HANDLE_LIMIT; ++i) {
             const struct handle *other = &tables[slot].handles[i];
-            if (other->used && other->output && other->entry.directory == entry->directory &&
+            if (other->used && (!writers_only || other->output) && other->entry.directory == entry->directory &&
                 equal_alias(other->entry.name, entry->name))
                 return 1;
         }
@@ -77,7 +78,7 @@ static int storage_error(enum fat16_edit_result status)
         return 0;
     case FAT16_EDIT_FULL: case FAT16_EDIT_SIZE:
         return APP_ERR_LIMIT;
-    case FAT16_EDIT_IO:
+    case FAT16_EDIT_IO: case FAT16_EDIT_UNCERTAIN:
         return APP_ERR_IO;
     case FAT16_EDIT_NAME: case FAT16_EDIT_TEXT_EXTENSION:
         return APP_ERR_INVALID;
@@ -110,7 +111,7 @@ int app_file_open(unsigned int slot, const unsigned char *path, unsigned int mod
         return APP_ERR_ACCESS;
     next.output = mode == APP_FILE_WRITE_MODE;
     if (next.output) {
-        if (output_in_use(table, &next.entry))
+        if (app_file_in_use(&table->volume, &next.entry, 1))
             return APP_ERR_ACCESS;
         const int error = storage_error(fat16_check_write(&table->volume,
             next.entry.directory, next.entry.name, name_length(next.entry.name)));
@@ -125,6 +126,13 @@ int app_file_open(unsigned int slot, const unsigned char *path, unsigned int mod
     next.seen = fat16_mutations();
     table->handles[index] = next;
     return HANDLE_BASE + index;
+}
+
+int app_file_assemble(unsigned int slot, const unsigned char *source, const unsigned char *target,
+    unsigned int version, struct asm_diagnostic *diagnostic)
+{
+    const struct file_table *table = &tables[slot];
+    return app_assemble_at(&table->volume, &table->cwd, source, target, version, diagnostic);
 }
 
 static struct handle *find_handle(struct file_table *table, unsigned int number)

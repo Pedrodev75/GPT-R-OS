@@ -7,7 +7,7 @@
 #include "../kernel/apps/assembler.h"
 
 static unsigned char file_bytes[APP_FILE_MAX + 1];
-static unsigned int allocated, left, fail_at;
+static unsigned int allocated, left, fail_at, assembly_calls;
 unsigned long long app_tss_descriptor[2];
 
 void *page_alloc(void)
@@ -82,6 +82,17 @@ int app_file_close(unsigned int slot, unsigned int handle, int commit)
     abort();
 }
 
+int app_file_assemble(unsigned int slot, const unsigned char *source, const unsigned char *target,
+    unsigned int version, struct asm_diagnostic *diagnostic)
+{
+    assert(slot == 0 && version == APP_V11_VERSION);
+    assert(!strcmp((const char *)source, "SOURCE.ASM"));
+    assert(!strcmp((const char *)target, "OUTPUT.APP"));
+    ++assembly_calls;
+    diagnostic->line = 13;
+    return APP_ERR_SYNTAX;
+}
+
 static void header_validation(void)
 {
     const struct app_info legacy = { APP_FORMAT_VERSION, APP_HEADER_SIZE, 4096, 0, 0, 10 };
@@ -107,6 +118,36 @@ static void header_validation(void)
     }
     file_bytes[5] = 2;
     assert(app_header_size(file_bytes, 8) == -2);
+}
+
+static void assembly_arguments(struct process *process)
+{
+    unsigned char source[] = "SOURCE.ASM", target[] = "OUTPUT.APP";
+    const unsigned long long from = APP_V11_DATA_BASE + PAGE_SIZE - 3;
+    const unsigned long long to = APP_V11_STACK_BASE + PAGE_SIZE - 4;
+    copy_user(process, from, source, sizeof(source), 1);
+    copy_user(process, to, target, sizeof(target), 1);
+    struct app_frame *frame = &process->frame;
+    frame->rax = APP_SYS_ASSEMBLE;
+    frame->rdi = from;
+    frame->rsi = to;
+    frame->rdx = APP_V11_VERSION;
+    service_file(process);
+    assert((long long)frame->rax == APP_ERR_SYNTAX && frame->rdx == 13 && assembly_calls == 1);
+
+    const unsigned long long invalid[] = {0, APP_V11_STACK_BASE - 1, ~0ull};
+    for (unsigned int i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        frame->rax = APP_SYS_ASSEMBLE;
+        frame->rsi = invalid[i];
+        frame->rdx = APP_V11_VERSION;
+        service_file(process);
+        assert((long long)frame->rax == APP_ERR_INVALID && frame->rdx == 0 && assembly_calls == 1);
+    }
+    frame->rax = APP_SYS_ASSEMBLE;
+    frame->rsi = to;
+    frame->rdx = 0x100000101ull;
+    service_file(process);
+    assert((long long)frame->rax == APP_ERR_INVALID && frame->rdx == 0 && assembly_calls == 1);
 }
 
 static void loading(void)
@@ -161,6 +202,7 @@ static void loading(void)
     }
     assert((p->frame.rsp & 15) == 0 && p->frame.rsp >= APP_V11_STACK_BASE);
     assert(!user_range(p, APP_V11_STACK_BASE - 1, 2, 1));
+    assembly_arguments(&processes[0]);
     app_cancel(0);
     assert(!allocated && app_task_info(0).memory_bytes == 0);
     app_release(0);
@@ -199,16 +241,16 @@ static void assembling(void)
     static char source[ASM_V11_SOURCE_LIMIT + 1];
     const struct asm_io io = { &fixture, read_source, emit_byte };
     struct app_info info;
-    unsigned int line;
+    struct asm_diagnostic diagnostic;
     left = 100;
     fixture.source = "entry begin\nbegin: mov eax, 2\nmov edi, 0\nint 0x80\n";
-    assert(!app_assemble(&io, strlen(fixture.source), APP_FORMAT_VERSION, &info, &line));
+    assert(!app_assemble(&io, strlen(fixture.source), APP_FORMAT_VERSION, &info, &diagnostic));
     assert(info.code_size == 12 && info.entry == 0 && !allocated);
     assert(!memcmp(fixture.out, "\xb8\x02\0\0\0\xbf\0\0\0\0\xcd\x80", 12));
 
     fixture.source = ".section .bss\nzero: resb 256\n.section .data\nmsg: db 22, 23\n"
         ".section .text\nentry start\nstart: lea rdi, [rip + zero]\nret\n";
-    assert(!app_assemble(&io, strlen(fixture.source), APP_V11_VERSION, &info, &line));
+    assert(!app_assemble(&io, strlen(fixture.source), APP_V11_VERSION, &info, &diagnostic));
     assert(info.code_size == 8 && info.data_size == 2 && info.bss_size == 256 && !allocated);
     assert(fixture.out[0] == 0x48 && fixture.out[1] == 0x8d && fixture.out[2] == 0x3d);
     assert(fixture.out[3] == 0xfb && fixture.out[4] == 0x0f && fixture.out[5] == 1 && fixture.out[6] == 0);
@@ -219,23 +261,23 @@ static void assembling(void)
     for (unsigned int i = 0; i < ASM_V11_LABEL_LIMIT; ++i)
         length += (unsigned int)snprintf(source + length, sizeof(source) - length, "label_%u: nop\n", i);
     assert(length > ASM_V1_SOURCE_LIMIT);
-    assert(!app_assemble(&io, length, APP_V11_VERSION, &info, &line) && !allocated);
+    assert(!app_assemble(&io, length, APP_V11_VERSION, &info, &diagnostic) && !allocated);
     length += (unsigned int)snprintf(source + length, sizeof(source) - length, "extra: ret\n");
-    assert(app_assemble(&io, length, APP_V11_VERSION, &info, &line) && !allocated);
+    assert(app_assemble(&io, length, APP_V11_VERSION, &info, &diagnostic) && !allocated);
 
     fixture.source = ".section .text\nentry data\nret\n.section .data\ndata: db 1\n";
-    assert(app_assemble(&io, strlen(fixture.source), APP_V11_VERSION, &info, &line) && !allocated);
+    assert(app_assemble(&io, strlen(fixture.source), APP_V11_VERSION, &info, &diagnostic) && !allocated);
     fixture.source = "ret\n.section .bss\nresb 65536\n";
-    assert(app_assemble(&io, strlen(fixture.source), APP_V11_VERSION, &info, &line) && !allocated);
+    assert(app_assemble(&io, strlen(fixture.source), APP_V11_VERSION, &info, &diagnostic) && !allocated);
     fixture.source = "ret\n.section .bss\nresb 65535\n";
-    assert(!app_assemble(&io, strlen(fixture.source), APP_V11_VERSION, &info, &line) && !allocated);
+    assert(!app_assemble(&io, strlen(fixture.source), APP_V11_VERSION, &info, &diagnostic) && !allocated);
     assert(info.code_size == 1 && info.bss_size == 65535);
     memcpy(source, "ret\n", 4);
     memset(source + 4, ' ', ASM_V11_SOURCE_LIMIT - 4);
     fixture.source = source;
-    assert(!app_assemble(&io, ASM_V11_SOURCE_LIMIT, APP_V11_VERSION, &info, &line) && !allocated);
+    assert(!app_assemble(&io, ASM_V11_SOURCE_LIMIT, APP_V11_VERSION, &info, &diagnostic) && !allocated);
     fixture.source = "ret\n";
-    assert(app_assemble(&io, ASM_V11_SOURCE_LIMIT + 1, APP_V11_VERSION, &info, &line));
+    assert(app_assemble(&io, ASM_V11_SOURCE_LIMIT + 1, APP_V11_VERSION, &info, &diagnostic));
 }
 
 int main(void)

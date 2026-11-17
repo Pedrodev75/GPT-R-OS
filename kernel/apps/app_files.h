@@ -5,6 +5,8 @@
 
 struct fat16_volume;
 struct fat16_path;
+struct fat16_location;
+struct asm_diagnostic;
 
 /* The filesystem adapter binds a launch volume and directory to this table. */
 void app_files_begin(unsigned int slot, const struct fat16_volume *volume,
@@ -15,5 +17,8 @@ int app_file_write(unsigned int slot, unsigned int handle, const unsigned char *
 int app_file_close(unsigned int slot, unsigned int handle, int commit);
 int app_files_finish(unsigned int slot, int commit);
 unsigned int app_files_pages(unsigned int slot);
+int app_file_in_use(const struct fat16_volume *volume, const struct fat16_location *entry, int writers_only);
+int app_file_assemble(unsigned int slot, const unsigned char *source, const unsigned char *target,
+    unsigned int version, struct asm_diagnostic *diagnostic);
 
 #endif

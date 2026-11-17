@@ -31,6 +31,7 @@ struct assembler {
     enum section section;
     int extended, emit, entry_seen;
     const char *error;
+    int status;
 };
 
 static unsigned char byte(const struct parser *parser)
@@ -148,12 +149,16 @@ static const char *define_label(struct assembler *a, struct token token)
     struct label *label = label_at(a, slot);
     if (label && label->length)
         return "rotulo duplicado";
-    if (a->label_count == a->label_limit)
+    if (a->label_count == a->label_limit) {
+        a->status = APP_ERR_LIMIT;
         return "rotulos demais";
+    }
     if (!label) {
         a->labels[page] = page_alloc();
-        if (!a->labels[page])
+        if (!a->labels[page]) {
+            a->status = APP_ERR_MEMORY;
             return "sem memoria para rotulos";
+        }
         for (unsigned int i = 0; i < LABELS_PER_PAGE; ++i)
             a->labels[page][i] = (struct label){0};
         label = label_at(a, slot);
@@ -210,6 +215,7 @@ static int reserve(struct assembler *a, unsigned int bytes)
 {
     if (bytes > a->image_limit - a->total) {
         a->error = "imagem excede o limite";
+        a->status = APP_ERR_LIMIT;
         return 0;
     }
     a->total += bytes;
@@ -226,6 +232,7 @@ static int emit(struct assembler *a, unsigned int value, unsigned int bytes)
         for (unsigned int i = 0; i < bytes; ++i) {
             if (!a->io->write(a->io->context, offset + i, value >> (i * 8))) {
                 a->error = "sem memoria para a imagem";
+                a->status = APP_ERR_MEMORY;
                 return 0;
             }
         }
@@ -578,26 +585,34 @@ static const char *assemble_passes(struct assembler *a, unsigned int source_size
     return 0;
 }
 
-const char *app_assemble(const struct asm_io *io, unsigned int source_size,
-    unsigned int version, struct app_info *info, unsigned int *error_line)
+int app_assemble(const struct asm_io *io, unsigned int source_size,
+    unsigned int version, struct app_info *info, struct asm_diagnostic *diagnostic)
 {
-    *error_line = 1;
-    if (version != APP_FORMAT_VERSION && version != APP_V11_VERSION)
-        return "versao GTRA incompativel";
+    *diagnostic = (struct asm_diagnostic){0};
+    if (version != APP_FORMAT_VERSION && version != APP_V11_VERSION) {
+        diagnostic->message = "versao GTRA incompativel";
+        return APP_ERR_INVALID;
+    }
     const int extended = version == APP_V11_VERSION;
-    if (source_size > (unsigned int)(extended ? ASM_V11_SOURCE_LIMIT : ASM_V1_SOURCE_LIMIT))
-        return "fonte excede o limite";
+    if (source_size > (unsigned int)(extended ? ASM_V11_SOURCE_LIMIT : ASM_V1_SOURCE_LIMIT)) {
+        diagnostic->message = "fonte excede o limite";
+        return APP_ERR_LIMIT;
+    }
     struct assembler a = {
         .io = io, .extended = extended,
         .label_limit = extended ? ASM_V11_LABEL_LIMIT : ASM_V1_LABEL_LIMIT,
-        .image_limit = extended ? APP_V11_IMAGE_LIMIT : APP_IMAGE_LIMIT
+        .image_limit = extended ? APP_V11_IMAGE_LIMIT : APP_IMAGE_LIMIT,
+        .status = APP_ERR_SYNTAX
     };
     *info = (struct app_info){
         .version = version, .header_size = extended ? APP_V11_HEADER_SIZE : APP_HEADER_SIZE
     };
-    const char *error = assemble_passes(&a, source_size, info, error_line);
+    diagnostic->message = assemble_passes(&a, source_size, info, &diagnostic->line);
     for (unsigned int i = 0; i < LABEL_PAGES; ++i)
         if (a.labels[i])
             page_free(a.labels[i]);
-    return error;
+    if (diagnostic->message)
+        return a.status;
+    diagnostic->line = 0;
+    return 0;
 }
