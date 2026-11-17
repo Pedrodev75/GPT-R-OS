@@ -537,6 +537,18 @@ static int read_path(const struct process *process, unsigned long long address,
     return 0;
 }
 
+struct user_source {
+    const struct process *process;
+    unsigned long long address;
+};
+
+static unsigned char read_assembly_byte(void *context, unsigned int offset)
+{
+    const struct user_source *source = context;
+    const unsigned long long address = source->address + offset;
+    return user_page(source->process, address)[address % PAGE_SIZE];
+}
+
 static void service_file(struct process *process)
 {
     const unsigned int slot = process - processes;
@@ -550,6 +562,14 @@ static void service_file(struct process *process)
         if ((version == APP_FORMAT_VERSION || version == APP_V11_VERSION) &&
             read_path(process, handle, source) && read_path(process, frame->rsi, target))
             result = app_file_assemble(slot, source, target, (unsigned int)version, &diagnostic);
+        if (version == (APP_ASM_BUFFER | APP_V11_VERSION) &&
+            frame->rcx && frame->rcx <= ASM_V11_SOURCE_LIMIT &&
+            user_range(process, handle, frame->rcx, 0) && read_path(process, frame->rsi, target)) {
+            struct user_source input = {process, handle};
+            const struct asm_io io = {&input, read_assembly_byte, 0};
+            result = app_file_assemble_buffer(slot, &io, frame->rcx, target,
+                APP_V11_VERSION, &diagnostic);
+        }
         frame->rdx = diagnostic.line;
     } else if (number == APP_SYS_OPEN) {
         unsigned char path[FAT16_PATH_CAPACITY];

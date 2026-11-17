@@ -1,0 +1,36 @@
+TIPOS, NOMES E OPERADORES
+
+i32: inteiro com sinal de 32 bits, de
+-2147483648 a 2147483647. Use literais decimais.
+bool: true ou false. Nao ha conversao implicita.
+Strings existem como literais nas APIs indicadas.
+Nao podem ser variaveis, parametros ou retornos.
+
+let n: i32 = 10          // imutavel
+mut ok: bool = false     // mutavel
+const MAX: i32 = 10 * 10 // constante
+ok = true
+
+const aceita expressoes de literais e constantes
+ja declaradas. Uma constante global pode ser lida
+por qualquer funcao. Nomes locais valem a partir
+da declaracao ate o fim do bloco.
+
+Precedencia, da maior para a menor:
+  - e ! unarios
+  * / %
+  + -
+  < <= > >=
+  == !=
+  &&
+  ||
+
+Parenteses mudam a ordem. Operadores binarios do
+mesmo nivel associam da esquerda para a direita.
+&& e || avaliam a direita apenas quando necessario.
+Igualdade aceita operandos do mesmo tipo escalar.
+
+A aritmetica i32 descarta os bits acima de 32.
+Divisao trunca para zero. O resto tem o sinal do
+dividendo. MIN / -1 resulta em MIN e MIN % -1 em 0.
+Divisao ou resto por zero termina o APP com R001.

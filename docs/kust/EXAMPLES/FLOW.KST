@@ -1,0 +1,12 @@
+app "Controle de Fluxo"
+func main() {
+    mut contador: i32 = 0
+    while contador < 3 {
+        if contador == 1 {
+            term.println("Um")
+        } else {
+            term.println(contador)
+        }
+        contador += 1
+    }
+}

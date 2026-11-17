@@ -1,0 +1,23 @@
+COMANDOS
+
+kust build ARQ.KST
+  Compila e grava ARQ.APP no diretorio atual.
+kust build ARQ.KST -o OUT.APP
+  Usa o caminho de saida indicado.
+kust check ARQ.KST
+  Verifica a fonte e a geracao de Assembly em
+  memoria. Nao grava arquivo nem invoca o assembler.
+kust docs [CAPITULO [PAG]]
+  Mostra o indice ou uma pagina de um capitulo.
+kust docs --all CAPITULO | cat
+  Envia o capitulo completo ao Terminal.
+kust version
+  Informa as versoes da linguagem e do compilador.
+kust help
+  Mostra estes comandos em formato curto.
+
+Para executar: run ARQ.APP
+Use o diretorio atual, ou caminhos absolutos e
+relativos. Em caso de erro, o comando retorna 1.
+No Desktop, o APP abre uma janela de saida.
+Use | cat para ver a saida no proprio Terminal.

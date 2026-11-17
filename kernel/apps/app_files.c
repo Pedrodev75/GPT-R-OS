@@ -135,6 +135,14 @@ int app_file_assemble(unsigned int slot, const unsigned char *source, const unsi
     return app_assemble_at(&table->volume, &table->cwd, source, target, version, diagnostic);
 }
 
+int app_file_assemble_buffer(unsigned int slot, const struct asm_io *source, unsigned int size,
+    const unsigned char *target, unsigned int version, struct asm_diagnostic *diagnostic)
+{
+    const struct file_table *table = &tables[slot];
+    return app_assemble_buffer_at(&table->volume, &table->cwd, source, size,
+        target, version, diagnostic);
+}
+
 static struct handle *find_handle(struct file_table *table, unsigned int number)
 {
     if (number < HANDLE_BASE || number - HANDLE_BASE >= APP_HANDLE_LIMIT)

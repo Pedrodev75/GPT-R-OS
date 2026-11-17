@@ -1,0 +1,22 @@
+app "Arquivo"
+func main() {
+    let leitor: i32 = file.openRead("/SYS64/DOCS/KUST/EXAMPLES/HELLO.KST")
+    if leitor < 0 {
+        app.exit(1)
+    }
+    let byte: i32 = file.readByte(leitor)
+    if file.close(leitor) != 0 {
+        app.exit(1)
+    }
+    term.println(byte)
+    // Este exemplo usa um nome de saida proprio.
+    let escritor: i32 = file.openWrite("kustout.txt")
+    if escritor < 0 {
+        app.exit(1)
+    }
+    let gravado: i32 = file.write(escritor, "Escrito pelo Kust\n")
+    if file.close(escritor) != 0 || gravado < 0 {
+        app.exit(1)
+    }
+    term.println(gravado)
+}

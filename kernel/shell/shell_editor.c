@@ -755,8 +755,9 @@ const char *shell_edit_file(const struct fat16_volume *volume, unsigned int dire
     if (!name_size || name_size > 12 || name[name_size])
         return "Uso: edit <arquivo>";
     if (!file_has_extension((const char *)name, ".TXT") &&
-        !file_has_extension((const char *)name, ".ASM"))
-        return "O Editor abre .txt e .asm";
+        !file_has_extension((const char *)name, ".ASM") &&
+        !file_has_extension((const char *)name, ".KST"))
+        return "O Editor abre .txt, .asm e .kst";
 
     if (filename_size && current_directory == directory &&
         shell_equals(name, (const char *)filename)) {

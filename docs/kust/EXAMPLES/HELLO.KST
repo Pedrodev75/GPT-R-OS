@@ -1,0 +1,4 @@
+app "Ola Mundo"
+func main() {
+    term.println("Olá, GPT-R OS!")
+}

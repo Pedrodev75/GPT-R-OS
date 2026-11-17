@@ -3,6 +3,7 @@
 import argparse
 from pathlib import Path
 import struct
+from kust_bundle import install_bundle
 
 
 SECTOR = 512
@@ -39,11 +40,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("boot", "loader", "kernel", "disk", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
+    bundle = parser.add_mutually_exclusive_group()
+    bundle.add_argument("--kust-app", type=Path,
+                        default=Path(__file__).resolve().parent.parent / "build" / "kust" / "KUST.APP",
+                        help="native compiler to install (default: build/kust/KUST.APP)")
+    bundle.add_argument("--without-kust", action="store_true", help="pack the kernel only")
     args = parser.parse_args()
     if args.output.resolve() == args.disk.resolve():
         parser.error("Use a separate output path for the new disk image")
     try:
         image = pack(*(path.read_bytes() for path in (args.boot, args.loader, args.kernel, args.disk)))
+        if not args.without_kust:
+            if not args.kust_app.is_file():
+                raise ValueError("KUST.APP is missing. Run tools/build-kust.py or pass --kust-app.")
+            install_bundle(image, args.kust_app)
         args.output.write_bytes(image)
     except (ValueError, OSError) as error:
         parser.error(str(error))

@@ -1,0 +1,21 @@
+ESTRUTURA
+
+Comece com app "Nome", seguido de funcoes e
+constantes globais opcionais. main() e obrigatoria
+e nao declara parametros nem retorno.
+O titulo e gravado nos dados do binario.
+O sistema continua identificando o APP pelo nome
+do arquivo.
+
+Identificadores distinguem maiusculas e minusculas.
+Use A-Z, a-z, _, e tambem digitos apos a primeira
+letra ou _. Cada identificador tem ate 31 bytes.
+
+Use // para comentario de linha e /* ... */ para
+comentario de bloco sem aninhamento. Chaves
+delimitam blocos. O ponto e virgula e opcional.
+Uma instrucao por linha facilita a leitura.
+
+Strings aceitam UTF-8 e os escapes
+\n (nova linha), \r, \t, \" e \\.
+O Terminal tem um conjunto limitado de glifos.

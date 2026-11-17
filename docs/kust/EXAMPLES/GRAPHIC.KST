@@ -1,0 +1,14 @@
+app "Grafico"
+func main() {
+    if gfx.begin(2109517) != 0 {
+        app.exit(1)
+    }
+    if gfx.rect(12, 12, 96, 42, 3658940) != 0 {
+        app.exit(2)
+    }
+    if gfx.present() != 0 {
+        app.exit(3)
+    }
+    term.println("Clique no quadro para encerrar")
+    term.println(gfx.wait())
+}

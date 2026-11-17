@@ -93,6 +93,19 @@ int app_file_assemble(unsigned int slot, const unsigned char *source, const unsi
     return APP_ERR_SYNTAX;
 }
 
+int app_file_assemble_buffer(unsigned int slot, const struct asm_io *source, unsigned int size,
+    const unsigned char *target, unsigned int version, struct asm_diagnostic *diagnostic)
+{
+    static const unsigned char expected[] = "SOURCE.ASM";
+    assert(slot == 0 && version == APP_V11_VERSION && size == sizeof(expected));
+    assert(!strcmp((const char *)target, "OUTPUT.APP"));
+    for (unsigned int i = 0; i < size; ++i)
+        assert(source->read(source->context, i) == expected[i]);
+    ++assembly_calls;
+    diagnostic->line = 7;
+    return APP_ERR_SYNTAX;
+}
+
 static void header_validation(void)
 {
     const struct app_info legacy = { APP_FORMAT_VERSION, APP_HEADER_SIZE, 4096, 0, 0, 10 };
@@ -148,6 +161,28 @@ static void assembly_arguments(struct process *process)
     frame->rdx = 0x100000101ull;
     service_file(process);
     assert((long long)frame->rax == APP_ERR_INVALID && frame->rdx == 0 && assembly_calls == 1);
+
+    frame->rax = APP_SYS_ASSEMBLE;
+    frame->rdi = from;
+    frame->rdx = APP_ASM_BUFFER | APP_V11_VERSION;
+    frame->rcx = sizeof(source);
+    service_file(process);
+    assert((long long)frame->rax == APP_ERR_SYNTAX && frame->rdx == 7 && assembly_calls == 2);
+
+    const unsigned long long rejected_sizes[] = {0, ASM_V11_SOURCE_LIMIT + 1ull, ~0ull};
+    for (unsigned int i = 0; i < sizeof(rejected_sizes) / sizeof(rejected_sizes[0]); ++i) {
+        frame->rax = APP_SYS_ASSEMBLE;
+        frame->rdx = APP_ASM_BUFFER | APP_V11_VERSION;
+        frame->rcx = rejected_sizes[i];
+        service_file(process);
+        assert((long long)frame->rax == APP_ERR_INVALID && frame->rdx == 0 && assembly_calls == 2);
+    }
+    frame->rax = APP_SYS_ASSEMBLE;
+    frame->rdi = APP_V11_DATA_BASE - 1;
+    frame->rdx = APP_ASM_BUFFER | APP_V11_VERSION;
+    frame->rcx = sizeof(source);
+    service_file(process);
+    assert((long long)frame->rax == APP_ERR_INVALID && frame->rdx == 0 && assembly_calls == 2);
 }
 
 static void loading(void)

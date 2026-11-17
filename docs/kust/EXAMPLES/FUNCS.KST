@@ -1,0 +1,18 @@
+app "Funcoes"
+func main() {
+    let resultado: i32 = somar(10, 20)
+    mostrar(resultado, par(resultado))
+}
+func somar(a: i32, b: i32) -> i32 {
+    return a + b
+}
+func par(valor: i32) -> bool {
+    return valor % 2 == 0
+}
+func mostrar(valor: i32, ok: bool) {
+    if ok {
+        term.println(valor)
+        return
+    }
+    term.println("Impar")
+}

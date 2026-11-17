@@ -1,0 +1,23 @@
+CONDICIONAIS E LACOS
+
+app "Contador"
+func main() {
+    mut n: i32 = 0
+    while n < 3 {
+        if n == 1 {
+            term.println("Um")
+        } else {
+            term.println(n)
+        }
+        n += 1
+    }
+}
+
+if e while exigem bool. Use chaves em cada bloco.
+else e opcional. Para encadear testes, use um if
+dentro do bloco else.
+
+Use = para alterar um nome mut. += e -= exigem
+i32. Declaracoes em blocos internos podem sombrear
+nomes de blocos externos. Um nome duplicado no
+mesmo bloco gera erro.

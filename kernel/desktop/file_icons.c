@@ -14,7 +14,7 @@ enum file_icon_kind file_icon_kind(const char *name, int folder)
         return FILE_ICON_APP;
     if (file_has_extension(name, ".PKG"))
         return FILE_ICON_PKG;
-    if (file_has_extension(name, ".TXT"))
+    if (file_has_extension(name, ".TXT") || file_has_extension(name, ".KST"))
         return FILE_ICON_TEXT;
     return FILE_ICON_GENERIC;
 }

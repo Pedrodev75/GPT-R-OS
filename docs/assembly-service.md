@@ -1,6 +1,6 @@
 # Serviço de montagem Assembly
 
-A syscall monta um arquivo `.ASM` no assembler nativo e grava um `.APP`. Funciona com processos GTRA v1 e v1.1, em janelas e em pipes. O comando `asm` usa o mesmo serviço internamente.
+A syscall monta código Assembly no assembler nativo e grava um `.APP`. Funciona com processos GTRA v1 e v1.1, em janelas e em pipes. O comando `asm` usa o mesmo serviço internamente.
 
 ## ABI
 
@@ -14,6 +14,14 @@ Faça a chamada com `int 0x80`.
 | `RDX` | `1` para GTRA v1 ou `0x0101` para GTRA v1.1 | Linha da montagem, começando em 1. Zero em sucesso ou quando não há linha associada. |
 
 Os caminhos terminam em NUL e têm até **221 bytes antes do NUL**. O kernel copia e valida os dois caminhos antes de iniciar a montagem. Eles podem atravessar fronteiras de páginas legíveis e obedecem às regras de caminhos e nomes 8.3 do FAT16. Caminhos relativos usam o diretório de trabalho herdado pelo processo. A chamada altera somente `RAX` e `RDX`. Os IDs e registradores de retorno das syscalls anteriores permanecem iguais.
+
+Para montar um buffer de Assembly e produzir GTRA v1.1, faça a mesma
+chamada com `RDX = 0x10101` (`APP_ASM_BUFFER | APP_V11_VERSION`).
+`RDI` aponta para o buffer e `RCX` contém seu tamanho de 1 a 65.536
+bytes. O buffer inteiro deve pertencer a uma região legível do
+processo. O destino e o contrato de retorno são os mesmos do modo
+por caminho. O kernel lê as páginas já validadas enquanto o processo
+está suspenso. O buffer dispensa arquivo temporário no FAT16.
 
 | Retorno | Significado |
 | --- | --- |

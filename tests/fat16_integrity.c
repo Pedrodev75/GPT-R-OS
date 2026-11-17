@@ -88,6 +88,47 @@ static void check_mirrors(void)
     CHECK(!memcmp(medium[1], medium[1 + FAT_SECTORS], FAT_SECTORS * 512));
 }
 
+static unsigned char source_byte(void *context, unsigned int at)
+{
+    return ((const unsigned char *)context)[at];
+}
+
+static void check_app(const char *name, unsigned int version);
+
+static void assembly_buffer_integrity(void)
+{
+    memset(medium, 0, sizeof(medium));
+    const unsigned char target[] = "KEEP.APP";
+    char valid[] = "entry main\nmain: ret\n";
+    char invalid[] = "nop\nnot_an_opcode\n";
+    const struct asm_io source = {valid, source_byte, 0}, broken = {invalid, source_byte, 0};
+    const struct fat16_path root = {0};
+    struct asm_diagnostic diagnostic;
+    app_files_begin(0, &volume, &root);
+    CHECK(put("KEEP.APP", "original") == FAT16_EDIT_OK);
+    CHECK(app_file_assemble_buffer(0, &broken, sizeof(invalid) - 1, target,
+        APP_V11_VERSION, &diagnostic) == APP_ERR_SYNTAX && diagnostic.line == 2);
+    CHECK(content_is("KEEP.APP", "original") && !outstanding);
+    fail_lba = ROOT;
+    fail = 1;
+    publish_before_failure = 1;
+    CHECK(app_file_assemble_buffer(0, &source, sizeof(valid) - 1, target,
+        APP_V11_VERSION, &diagnostic) == APP_ERR_WRITE);
+    CHECK(content_is("KEEP.APP", "original") && !outstanding);
+    check_mirrors();
+    page_budget = 0;
+    CHECK(app_file_assemble_buffer(0, &source, sizeof(valid) - 1, target,
+        APP_V11_VERSION, &diagnostic) == APP_ERR_MEMORY);
+    CHECK(content_is("KEEP.APP", "original") && !outstanding);
+    page_budget = -1;
+    CHECK(app_file_assemble_buffer(0, &source, sizeof(valid) - 1, target,
+        APP_V11_VERSION, &diagnostic) == 0);
+    check_app("KEEP.APP", APP_V11_VERSION);
+    check_mirrors();
+    CHECK(!outstanding && !app_files_finish(0, 1));
+    puts("Assembly from memory preserved the previous destination after failures");
+}
+
 static unsigned int next_free(unsigned int from)
 {
     for (unsigned int cluster = from; cluster < CLUSTERS + 2; ++cluster) {
@@ -397,6 +438,7 @@ int main(void)
     CHECK(outstanding == 0);
     assembly_service();
     sys64_foundation();
+    assembly_buffer_integrity();
     puts("FAT16 and APP checks completed.");
     return 0;
 }

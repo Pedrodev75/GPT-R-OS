@@ -1,0 +1,14 @@
+app "Variaveis"
+const AUMENTO: i32 = 2 * 3
+func main() {
+    let inicio: i32 = 10
+    mut total: i32 = inicio
+    total += AUMENTO
+    total -= 1
+    if true {
+        const inicio: i32 = 99
+        term.println(inicio)
+    }
+    term.println(inicio)
+    term.println(total)
+}

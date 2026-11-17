@@ -1,0 +1,25 @@
+PRIMEIRO APLICATIVO
+
+O KUST.APP ja vem instalado nas imagens Kust
+Edition. Confirme com: kust version
+
+No Terminal, em uma pasta gravavel, execute
+edit HELLO.KST. Digite e salve com Ctrl+S:
+
+app "Ola Mundo"
+func main() {
+    term.println("Ola, GPT-R OS!")
+}
+
+Volte ao Terminal:
+kust check HELLO.KST
+kust build HELLO.KST
+run HELLO.APP
+
+Para testar o mesmo exemplo sem digitar a fonte:
+kust build /SYS64/DOCS/KUST/EXAMPLES/HELLO.KST
+run HELLO.APP
+
+A saida fica no diretorio atual. A documentacao
+e os exemplos do SYS64 sao protegidos. Copie um
+exemplo para uma pasta gravavel antes de editar.

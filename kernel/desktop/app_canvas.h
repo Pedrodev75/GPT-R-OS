@@ -3,8 +3,9 @@
 
 #ifdef GPT_R_GRAPHICS
 
+#include "../apps/app_abi.h"
+
 enum {
-    APP_GUI_BEGIN = 4, APP_GUI_RECT, APP_GUI_TEXT, APP_GUI_PRESENT, APP_GUI_WAIT,
     APP_GUI_COMMANDS = 96, APP_GUI_GLYPHS = 512
 };
 

@@ -1,0 +1,9 @@
+app "Memoria"
+func main() {
+    term.println(mem.alloc(16))
+    term.println(mem.read(0))
+    term.println(mem.write(15, 42))
+    term.println(mem.read(15))
+    term.println(mem.read(16))
+    term.println(mem.free())
+}

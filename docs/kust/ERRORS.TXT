@@ -1,0 +1,20 @@
+DIAGNOSTICOS
+
+E001 Nome de variavel, funcao ou API desconhecido.
+E002 Tipos incompativeis. Veja esperado e recebido.
+E003 Tentativa de atribuir a um nome imutavel.
+E004 Erro lexico (escape, string, comentario, byte).
+E005 Erro de sintaxe (token ou delimitador).
+E006 Limite da linguagem excedido.
+E007 Declaracao duplicada no mesmo escopo.
+E008 Erro semantico (main, aridade, retorno ou valor).
+E009 Limite do Assembly gerado.
+E010 Comando, caminho ou capitulo invalido.
+E011 Falha de acesso, leitura ou memoria.
+E012 Falha do assembler ou da escrita do APP.
+R001 Divisao por zero durante a execucao.
+
+Linha e coluna comecam em 1. Colunas contam bytes.
+Em E012, a linha adicional pertence ao Assembly
+gerado. O diagnostico da fonte inclui seu caminho.
+O APP anterior e mantido quando a fonte falha.

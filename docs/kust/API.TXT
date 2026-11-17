@@ -1,0 +1,39 @@
+APIS NATIVAS
+
+term.print(valor) e term.println(valor)
+  Um literal string, i32 ou bool. println adiciona LF.
+app.exit(codigo: i32)
+  Encerra o aplicativo. O fim de main retorna zero.
+
+Arquivos (resultados i32):
+  file.openRead("ARQ.TXT")  -> handle ou erro
+  file.openWrite("arq.txt") -> handle ou erro
+  file.readByte(handle)     -> byte 0..255, EOF -11
+  file.write(handle, "texto") -> bytes ou erro
+  file.close(handle)        -> 0 ou erro
+Caminhos sao literais FAT16, relativos ao diretorio
+de trabalho ou absolutos. Erros do sistema sao
+negativos. Ha ate 4 handles por APP. Uma escrita
+substitui o conteudo quando fechada. Feche e confira
+o resultado. Na saida normal, a ABI tambem fecha
+escritas pendentes. Falha ou cancelamento as descarta.
+
+Memoria (resultados i32):
+  mem.alloc(tamanho)    -> 0 ou erro
+  mem.read(indice)      -> byte ou erro
+  mem.write(indice, byte) -> 0 ou erro
+  mem.free()            -> 0 ou erro
+Cada APP tem um buffer de 1 a 4096 bytes, inicialmente
+zerado. Alocar duas vezes sem liberar retorna -1.
+Indices comecam em 0. Bytes vao de 0 a 255. Nenhum
+endereco ou ponteiro e exposto.
+
+Tela (resultados i32, Desktop):
+  gfx.begin(rgb) prepara o quadro.
+  gfx.rect(x, y, largura, altura, rgb) desenha.
+  gfx.present() mostra o quadro.
+  gfx.wait() aguarda um clique e devolve y*65536+x.
+Coordenadas sao pixels. RGB e um inteiro de 24 bits.
+As tres primeiras operacoes retornam 0 ou -1.
+gfx.wait retorna -1 se nao houver janela grafica.
+Use sem pipes ou redirecionamento. Teste GRAPHIC.KST.

@@ -1,0 +1,22 @@
+LIMITES DO KUST 0.1
+
+Fonte: 32768 bytes e 16384 tokens. Assembly de
+saida: 65536 bytes. Imagem GTRA: 65536 bytes de
+codigo, dados e BSS somados.
+
+Identificador: 31 bytes. Literal: 512 bytes na
+fonte, sem as aspas. Funcoes: 64. Parametros: 8.
+Constantes globais: 64. Variaveis locais alocadas:
+64 por funcao. Expressoes e blocos tem um limite
+conjunto de 24 niveis. A pilha do APP tem 16 KiB.
+Chamadas recursivas consomem essa pilha.
+
+Strings sao somente literais. Apenas i32 e bool
+podem ser armazenados em nomes e passados a funcoes.
+Sem tipos compostos, input do Terminal, bibliotecas
+externas ou acesso a ponteiros.
+
+Nomes de arquivos seguem FAT16 8.3. Kust gera
+GTRA v1.1, que requer NX. O Editor abre arquivos
+de ate 4 KiB. Fontes maiores podem ser copiadas
+para uma imagem FAT16 antes de iniciar o sistema.

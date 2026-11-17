@@ -1,0 +1,11 @@
+app "Matematica"
+func main() {
+    term.println(2 + 3 * 4)
+    term.println((2 + 3) * 4)
+    term.println(-17 / 5)
+    term.println(-17 % 5)
+    term.println(-2147483648 / -1)
+    term.println(10 - 4 - 2)
+    term.println(3 >= 3 && 2 != 1 && !(2 > 3))
+    term.println(false && 1 / 0 == 0 || 4 <= 4)
+}

@@ -1,0 +1,23 @@
+FUNCOES
+
+app "Soma"
+func main() {
+    let resultado: i32 = somar(10, 20)
+    term.println(resultado)
+}
+func somar(a: i32, b: i32) -> i32 {
+    return a + b
+}
+
+Use func nome(parametro: tipo) e, se houver retorno,
+-> i32 ou -> bool. Parametros sao imutaveis.
+Quantidade e tipos dos argumentos devem coincidir.
+Uma funcao pode chamar outra declarada mais adiante.
+Argumentos sao avaliados da esquerda para a direita.
+
+Funcoes sem tipo de retorno aceitam return sem valor
+ou o fim do bloco. Em funcoes com retorno, todos os
+caminhos que saem da funcao precisam de um valor.
+O compilador nao presume que while sera executado.
+return sem valor ocupa sua linha ou termina em ;.
+app.exit(codigo) encerra o aplicativo inteiro.

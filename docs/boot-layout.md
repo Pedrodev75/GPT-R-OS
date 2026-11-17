@@ -26,10 +26,13 @@ ELF com GNU objcopy:
 objcopy -O binary -j .boot os.elf boot.bin
 objcopy -O binary -j .stage2 os.elf loader.bin
 objcopy -O binary -j .kernel os.elf kernel.bin
+python3 tools/build-kust.py
 python3 tools/pack-image.py --boot boot.bin --loader loader.bin \
     --kernel kernel.bin --disk disco-base.img --output gpt-r-hd.img
 ```
 
 Passe a imagem FAT16 já particionada em `--disk`. O empacotador mantém a
-tabela de partições e o conteúdo das partições e grava uma nova imagem em
-`--output`.
+tabela de partições e os arquivos existentes, inclui o compilador Kust,
+o manual e os exemplos em `/SYS64` e grava uma nova imagem em
+`--output`. Veja o [bootstrap do Kust](kust-compiler.md) para os
+parâmetros de empacotamento.

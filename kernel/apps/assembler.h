@@ -26,5 +26,8 @@ int app_assemble(const struct asm_io *io, unsigned int source_size,
 int app_assemble_at(const struct fat16_volume *volume, const struct fat16_path *cwd,
     const unsigned char *source, const unsigned char *target, unsigned int version,
     struct asm_diagnostic *diagnostic);
+int app_assemble_buffer_at(const struct fat16_volume *volume, const struct fat16_path *cwd,
+    const struct asm_io *source, unsigned int size, const unsigned char *target,
+    unsigned int version, struct asm_diagnostic *diagnostic);
 
 #endif
