@@ -2,7 +2,7 @@
 #include "app_files.h"
 #include "../desktop/app_canvas.h"
 #include "../memory/pages.h"
-#include "../drivers/keyboard.h"
+#include "../drivers/timer.h"
 
 enum {
     USER_IMAGE = 0x80000000u,
@@ -44,17 +44,19 @@ static unsigned long long directory[512] __attribute__((aligned(PAGE_SIZE)));
 static unsigned long long table[512] __attribute__((aligned(PAGE_SIZE)));
 static unsigned long long stack_page_flags;
 
-enum process_state { UNUSED, READY, WAITING, WAITING_CLICK, WAITING_IO, FINISHED };
+enum process_state { UNUSED, READY, WAITING, WAITING_OUTPUT, WAITING_CLICK, WAITING_IO, FINISHED };
 
 struct process {
     struct app_frame frame;
     unsigned char fpu[512] __attribute__((aligned(16)));
     enum process_state state;
     unsigned int pid;
+    unsigned int started_at, stopped_at, cpu_ticks;
     unsigned char *image, *stack;
     unsigned char *heap_pages[APP_HEAP_PAGES];
     unsigned char heap_runs[APP_HEAP_PAGES];
     unsigned int image_size, read_capacity;
+    unsigned int output_offset;
     unsigned long long read_address;
     int (*output)(void *, const unsigned char *, unsigned int);
     int headless;
@@ -62,7 +64,7 @@ struct process {
     struct app_result result;
 };
 
-static struct process processes[APP_PROCESS_LIMIT];
+static struct process processes[APP_PROCESS_SLOTS];
 static struct process *running;
 static unsigned int next_slot, next_pid;
 static unsigned char io_buffer[APP_IO_LIMIT];
@@ -96,7 +98,7 @@ void app_init(void)
     running = 0;
     next_slot = 0;
     next_pid = 1;
-    for (unsigned int i = 0; i < APP_PROCESS_LIMIT; ++i) {
+    for (unsigned int i = 0; i < APP_PROCESS_SLOTS; ++i) {
         processes[i].state = UNUSED;
         processes[i].pid = 0;
     }
@@ -225,6 +227,7 @@ static unsigned long long build_user_stack(unsigned char *stack,
 
 static void release_resources(struct process *process)
 {
+    process->stopped_at = timer_ticks();
     const int saved = app_files_finish(process - processes, process->result.status == APP_EXITED);
     if (saved && process->result.status == APP_EXITED)
         process->result.status = APP_SAVE_ERROR;
@@ -282,9 +285,9 @@ static unsigned int allocate_pid(void)
         if (!pid)
             continue;
         unsigned int i = 0;
-        while (i < APP_PROCESS_LIMIT && processes[i].pid != pid)
+        while (i < APP_PROCESS_SLOTS && processes[i].pid != pid)
             ++i;
-        if (i == APP_PROCESS_LIMIT)
+        if (i == APP_PROCESS_SLOTS)
             return pid;
     }
 }
@@ -293,9 +296,21 @@ struct app_task_info app_task_info(unsigned int slot)
 {
     const struct process *process = &processes[slot];
     const enum app_task_state state = process->state == READY ? APP_TASK_RUNNING :
-        (process->state == WAITING || process->state == WAITING_CLICK ||
+        (process->state == WAITING || process->state == WAITING_OUTPUT || process->state == WAITING_CLICK ||
          process->state == WAITING_IO) ? APP_TASK_WAITING : APP_TASK_FINISHED;
-    return (struct app_task_info){ .pid = process->pid, .state = state };
+    if (!process->pid)
+        return (struct app_task_info){0};
+    unsigned int pages = process->image ? 2 : 0;
+    if (pages) {
+        for (unsigned int i = 0; i < APP_HEAP_PAGES; ++i)
+            pages += process->heap_pages[i] != 0;
+        pages += app_files_pages(slot);
+    }
+    const unsigned int end = state == APP_TASK_FINISHED ? process->stopped_at : timer_ticks();
+    return (struct app_task_info){
+        .pid = process->pid, .state = state, .cpu_ticks = process->cpu_ticks,
+        .elapsed_ticks = end - process->started_at, .memory_bytes = pages * PAGE_SIZE
+    };
 }
 
 enum app_status app_start(unsigned int slot, const struct fat16_volume *volume,
@@ -326,6 +341,8 @@ enum app_status app_start(unsigned int slot, const struct fat16_volume *volume,
                     .frame = { .rip = USER_IMAGE + info.entry, .cs = 0x23,
                         .flags = 0x202, .rsp = rsp, .ss = 0x1b },
                     .state = READY, .pid = allocate_pid(), .image = image, .stack = stack, .image_size = info.image_size,
+                    .started_at = timer_ticks(),
+                    .headless = slot >= APP_PROCESS_LIMIT,
                     .output = launch->output, .context = launch->context
                 };
                 app_files_begin(slot, volume, launch->directory);
@@ -348,7 +365,7 @@ enum app_status app_start(unsigned int slot, const struct fat16_volume *volume,
 
 int app_ready(void)
 {
-    for (unsigned int i = 0; i < APP_PROCESS_LIMIT; ++i)
+    for (unsigned int i = 0; i < APP_PROCESS_SLOTS; ++i)
         if (processes[i].state == READY)
             return 1;
     return 0;
@@ -356,10 +373,10 @@ int app_ready(void)
 
 void app_schedule(void)
 {
-    for (unsigned int i = 0; i < APP_PROCESS_LIMIT; ++i) {
-        const unsigned int slot = (next_slot + i) % APP_PROCESS_LIMIT;
+    for (unsigned int i = 0; i < APP_PROCESS_SLOTS; ++i) {
+        const unsigned int slot = (next_slot + i) % APP_PROCESS_SLOTS;
         if (processes[slot].state == READY) {
-            next_slot = (slot + 1) % APP_PROCESS_LIMIT;
+            next_slot = (slot + 1) % APP_PROCESS_SLOTS;
             dispatch(&processes[slot]);
             return;
         }
@@ -533,6 +550,7 @@ static _Noreturn void finish(struct app_result result)
 void app_preempt(const struct app_frame *frame)
 {
     if (running && (frame->cs & 3) == 3) {
+        ++running->cpu_ticks;
         running->frame = *frame;
         app_leave();
     }
@@ -637,6 +655,12 @@ void app_syscall(struct app_frame *frame)
     if (!user_range(running, argument, length, 0))
         return;
 
+    if (running->headless) {
+        running->frame = *frame;
+        running->output_offset = 0;
+        running->state = WAITING_OUTPUT;
+        app_leave();
+    }
     if (!running->output(running->context, (const unsigned char *)argument, length))
         finish((struct app_result){ .status = APP_OUTPUT_ERROR });
     frame->rax = length;
@@ -660,10 +684,27 @@ void app_complete_read(unsigned int slot, const unsigned char *bytes, unsigned i
     process->state = READY;
 }
 
+unsigned int app_drain_output(unsigned int slot, unsigned char *bytes, unsigned int capacity)
+{
+    struct process *process = &processes[slot];
+    if (process->state != WAITING_OUTPUT || !capacity)
+        return 0;
+    const unsigned int remaining = process->frame.rsi - process->output_offset;
+    const unsigned int count = remaining < capacity ? remaining : capacity;
+    copy_user(process, process->frame.rdi + process->output_offset, bytes, count, 0);
+    process->output_offset += count;
+    if (count == remaining) {
+        process->frame.rax = process->frame.rsi;
+        process->state = READY;
+    }
+    return count;
+}
+
 void app_cancel(unsigned int slot)
 {
     struct process *process = &processes[slot];
-    if (process->state == READY || process->state == WAITING || process->state == WAITING_CLICK) {
+    if (process->state == READY || process->state == WAITING || process->state == WAITING_OUTPUT ||
+        process->state == WAITING_CLICK) {
         process->result = (struct app_result){ .status = APP_INTERRUPTED };
         process->state = FINISHED;
         release_resources(process);
@@ -685,40 +726,6 @@ void app_release(unsigned int slot)
     app_cancel(slot);
     processes[slot].state = UNUSED;
     processes[slot].pid = 0;
-}
-
-struct app_result app_run(const struct fat16_volume *volume,
-    const struct fat16_file *file, const struct app_launch *launch)
-{
-    unsigned int slot = 0;
-    while (slot < APP_PROCESS_LIMIT && processes[slot].pid)
-        ++slot;
-    if (slot == APP_PROCESS_LIMIT)
-        return (struct app_result){ .status = APP_LIMIT };
-    const enum app_status status = app_start(slot, volume, file, launch);
-    if (status != APP_STARTED)
-        return (struct app_result){ .status = status };
-    struct process *process = &processes[slot];
-    process->headless = 1;
-    keyboard_capture_interrupt(1);
-    struct app_result result;
-    while (!app_take_result(slot, &result)) {
-        if (keyboard_take_interrupt()) {
-            app_cancel(slot);
-        } else if (process->state == WAITING) {
-            const unsigned int count = launch->input(launch->context, io_buffer,
-                process->read_capacity);
-            if (count >= process->read_capacity)
-                app_cancel(slot);
-            else
-                app_complete_read(slot, io_buffer, count);
-        } else {
-            dispatch(process);
-        }
-    }
-    keyboard_capture_interrupt(0);
-    app_release(slot);
-    return result;
 }
 
 void app_handle_exception(unsigned long long cs, unsigned long long vector,

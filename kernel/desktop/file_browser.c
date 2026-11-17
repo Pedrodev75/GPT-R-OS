@@ -5,6 +5,7 @@
 #include "file_icons.h"
 #include "shortcuts.h"
 #include "tool_view.h"
+#include "trash.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/timer.h"
 #include "../shell/shell_internal.h"
@@ -323,9 +324,21 @@ static int paste_file(void)
     return 1;
 }
 
+static int send_selected_to_trash(void)
+{
+    if (browser.selected >= browser.count || browser.files[browser.selected].is_directory)
+        return 0;
+    const char *error = trash_send(&browser.volume, &browser.here,
+        &browser.files[browser.selected]);
+    if (!error)
+        scan_page(0);
+    browser.notice = error ? error : "Arquivo enviado para Lixeira";
+    return 1;
+}
+
 static unsigned int menu_count(void)
 {
-    return browser.context_open == MENU_FILE ? 4 : browser.context_open == MENU_NEW ? 3 : 1;
+    return browser.context_open == MENU_FILE ? 5 : browser.context_open == MENU_NEW ? 3 : 1;
 }
 
 static void show_menu(enum menu_type menu, unsigned int x, unsigned int y)
@@ -343,6 +356,8 @@ static int menu_action(unsigned int row)
     browser.context_open = MENU_NONE;
     if (type == MENU_NEW)
         return begin_name(NAME_FOLDER + row);
+    if (type == MENU_FILE && row == 4)
+        return send_selected_to_trash();
     if (type == MENU_FOLDER || row == 3) {
         create_shortcut();
     } else if (row == 2) {
@@ -392,6 +407,8 @@ int browser_key(unsigned int key)
     }
     if (key == KEY_PASTE)
         return paste_file();
+    if (key == KEY_DELETE)
+        return send_selected_to_trash();
     if (key == '\n') {
         open_selected();
     } else if (key == KEY_DOWN && browser.count) {
@@ -585,7 +602,7 @@ void browser_draw(unsigned int x, unsigned int y, unsigned int clip_y, unsigned 
         vga_graphics_fill(left + 3, top + 4, CONTEXT_WIDTH, height, 0x080e19);
         vga_graphics_fill(left, top, CONTEXT_WIDTH, height, TOOL_BORDER);
         for (unsigned int i = 0; i < menu_count(); ++i) {
-            static const char *const actions[] = {"Copiar", "Recortar", "Renomear", "Criar atalho"};
+            static const char *const actions[] = {"Copiar", "Recortar", "Renomear", "Criar atalho", "Enviar Lixeira"};
             static const char *const types[] = {"Pasta", "Texto .txt", "Fonte .asm"};
             const char *label = browser.context_open == MENU_NEW ? types[i] :
                 browser.context_open == MENU_FILE ? actions[i] : actions[3];

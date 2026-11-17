@@ -14,6 +14,7 @@ struct desktop_task {
 
 void desktop_get_tasks(struct desktop_task tasks[APP_PROCESS_LIMIT]);
 int desktop_end_task(unsigned int pid);
+int desktop_focus_task(unsigned int pid);
 void tasks_init(void);
 int tasks_refresh(void);
 int tasks_click(unsigned int x, unsigned int y);

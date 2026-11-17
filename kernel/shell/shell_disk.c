@@ -363,59 +363,6 @@ void shell_cat(unsigned int *row, const unsigned char *argument)
         shell_print_error(row, "Falha ao ler arquivo ou cadeia FAT16");
 }
 
-static unsigned int read_app_line(void *context, unsigned char *buffer,
-    unsigned int capacity)
-{
-    struct text_output *output = context;
-    if (output->continuation) {
-        text_byte(output, '?');
-        output->continuation = 0;
-    }
-    if (output->col)
-        text_next_row(output);
-
-    unsigned int length = 0;
-    for (;;) {
-        shell_move_cursor(*output->row, output->col);
-        const unsigned int key = shell_wait_key();
-        if (key == KEY_INTERRUPT)
-            return capacity;
-        if (key == '\n')
-            break;
-        if (key == '\b' && length) {
-            do {
-                --length;
-            } while (length && (buffer[length] & 0xc0) == 0x80);
-            console_put(*output->row * WIDTH + --output->col, console_color | ' ');
-        } else if (key >= ' ' && key <= 255 && output->col < WIDTH - 1) {
-            unsigned char bytes[3];
-            const unsigned int size = shell_encode_glyph(bytes, key);
-            if (size < capacity - length) {
-                for (unsigned int i = 0; i < size; ++i)
-                    buffer[length++] = bytes[i];
-                text_byte(output, key);
-            }
-        }
-    }
-    buffer[length] = 0;
-    text_next_row(output);
-    return length;
-}
-
-static unsigned int read_app_input(void *context, unsigned char *buffer, unsigned int capacity)
-{
-    return shell_has_input() ? shell_read_input(buffer, capacity - 1) :
-        read_app_line(context, buffer, capacity);
-}
-
-static int write_app_output(void *context, const unsigned char *data, unsigned int size)
-{
-    if (shell_has_output())
-        return shell_capture(data, size);
-    text_chunk(context, data, size);
-    return 1;
-}
-
 static int pack_arguments(const unsigned char *text, unsigned char *args,
     struct app_launch *launch)
 {
@@ -436,40 +383,23 @@ static int pack_arguments(const unsigned char *text, unsigned char *args,
     return 1;
 }
 
-void shell_run_app(unsigned int *row, const unsigned char *argument)
+static int prepare_app(unsigned int *row, const unsigned char *argument, unsigned char *args,
+    struct app_launch *launch, const struct fat16_volume *volume, struct fat16_file *file)
 {
-    unsigned char args[APP_ARG_BYTES];
-    struct app_launch launch = { .args = args, .directory = shell_directory() };
-    if (!pack_arguments(argument, args, &launch)) {
+    *launch = (struct app_launch){ .args = args, .directory = shell_directory() };
+    if (!pack_arguments(argument, args, launch)) {
         shell_print_error(row, "Argumentos demais para run");
-        return;
+        return 0;
     }
-    if (!launch.argc) {
+    if (!launch->argc) {
         shell_print_error(row, "Uso: run <arquivo.APP> [argumentos]");
-        return;
+        return 0;
     }
+    return shell_find_file(row, volume, args, file);
+}
 
-    struct ata_disk disk;
-    struct fat16_volume volume;
-    struct fat16_file file;
-    if (!shell_open_volume(row, &disk, &volume) || !shell_find_file(row, &volume, args, &file))
-        return;
-
-    struct app_result result;
-#ifdef GPT_R_GRAPHICS
-    if (!shell_in_pipeline())
-        result = (struct app_result){ .status = desktop_open_app(&volume, &file, &launch) };
-    else
-#endif
-    {
-        struct text_output output = { .row = row };
-        launch.output = write_app_output;
-        launch.input = read_app_input;
-        launch.context = &output;
-        result = app_run(&volume, &file, &launch);
-        finish_text(&output);
-    }
-
+static void report_app_result(unsigned int *row, struct app_result result)
+{
     switch (result.status) {
     case APP_SAVE_ERROR:
         shell_print_error(row, "Falha ao salvar arquivo");
@@ -494,7 +424,6 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
         break;
     }
     case APP_INTERRUPTED:
-        shell_discard_input();
         shell_print_error(row, "Programa interrompido (Ctrl+C)");
         break;
     case APP_INVALID:
@@ -518,6 +447,219 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
     default:
         break;
     }
+}
+
+
+struct app_pipe {
+    unsigned char *bytes;
+    unsigned int first, count;
+};
+
+struct job_input {
+    unsigned char bytes[WIDTH * 3];
+    unsigned int length, capacity;
+};
+
+static unsigned int fill_pipe(unsigned int slot, struct app_pipe *pipe)
+{
+    const unsigned int tail = (pipe->first + pipe->count) % PAGE_SIZE;
+    const unsigned int contiguous = PAGE_SIZE - tail;
+    const unsigned int available = PAGE_SIZE - pipe->count;
+    const unsigned int size = app_drain_output(slot, pipe->bytes + tail,
+        available < contiguous ? available : contiguous);
+    pipe->count += size;
+    return size;
+}
+
+static unsigned int drain_pipe(struct app_pipe *pipe, unsigned char *bytes, unsigned int capacity)
+{
+    const unsigned int count = capacity < pipe->count ? capacity : pipe->count;
+    for (unsigned int i = 0; i < count; ++i)
+        bytes[i] = pipe->bytes[(pipe->first + i) % PAGE_SIZE];
+    pipe->first = (pipe->first + count) % PAGE_SIZE;
+    pipe->count -= count;
+    return count;
+}
+
+static void input_key(struct job_input *input, struct text_output *output, unsigned int key)
+{
+    if (key == '\n') {
+        app_complete_read(APP_PROCESS_LIMIT, input->bytes, input->length);
+        input->capacity = input->length = 0;
+        text_next_row(output);
+    } else if (key == '\b' && input->length) {
+        do {
+            --input->length;
+        } while (input->length && (input->bytes[input->length] & 0xc0) == 0x80);
+        console_put(*output->row * WIDTH + --output->col, console_color | ' ');
+    } else if (key >= ' ' && key <= 255 && output->col < WIDTH - 1) {
+        unsigned char bytes[3];
+        const unsigned int size = shell_encode_glyph(bytes, key);
+        if (size < input->capacity - input->length) {
+            for (unsigned int i = 0; i < size; ++i)
+                input->bytes[input->length++] = bytes[i];
+            text_byte(output, key);
+        }
+    }
+    if (input->capacity)
+        shell_move_cursor(*output->row, output->col);
+}
+
+static void release_apps(unsigned int *live, unsigned int end)
+{
+    for (unsigned int i = 0; i < end; ++i) {
+        if (*live & (1u << i)) {
+            app_release(APP_PROCESS_LIMIT + i);
+            *live &= ~(1u << i);
+        }
+    }
+}
+
+static int collect_apps(unsigned int *live, unsigned int count, struct app_result *result)
+{
+    for (unsigned int i = 0; i < count; ++i) {
+        const unsigned int slot = APP_PROCESS_LIMIT + i;
+        if (!(*live & (1u << i)) || !app_take_result(slot, result))
+            continue;
+        app_release(slot);
+        *live &= ~(1u << i);
+        if (result->status != APP_EXITED || result->exit_code)
+            return 0;
+        /* A successful consumer can close its input without waiting for EOF. */
+        release_apps(live, i);
+    }
+    return *live != 0;
+}
+
+static struct app_result run_apps(unsigned int *row, unsigned int count, unsigned int *live,
+    struct app_pipe *pipes, struct shell_stream *stream)
+{
+    struct text_output output = { .row = row };
+    struct job_input input = {0};
+    unsigned char bytes[PAGE_SIZE];
+    struct app_result result = { .status = APP_EXITED };
+    while (collect_apps(live, count, &result)) {
+        if (input.capacity && !(*live & 1)) {
+            input.capacity = input.length = 0;
+            if (output.col)
+                text_next_row(&output);
+        }
+        int progress = 0;
+        for (unsigned int i = 0; i < count; ++i) {
+            if (!(*live & (1u << i)))
+                continue;
+            const unsigned int slot = APP_PROCESS_LIMIT + i;
+            const unsigned int capacity = app_read_capacity(slot);
+            if (capacity && i) {
+                struct app_pipe *source = &pipes[i - 1];
+                if (source->count || !(*live & (1u << (i - 1))) || capacity == 1) {
+                    const unsigned int size = drain_pipe(source, bytes, capacity - 1);
+                    app_complete_read(slot, bytes, size);
+                    progress = 1;
+                }
+            } else if (capacity && shell_has_input()) {
+                const unsigned int size = shell_read_input(bytes, capacity - 1);
+                app_complete_read(slot, bytes, size);
+                progress = 1;
+            } else if (capacity && !input.capacity) {
+                if (output.continuation) {
+                    text_byte(&output, '?');
+                    output.continuation = 0;
+                }
+                if (output.col)
+                    text_next_row(&output);
+                input.capacity = capacity;
+                shell_move_cursor(*row, 0);
+            }
+            if (i + 1 < count) {
+                progress |= fill_pipe(slot, &pipes[i]) != 0;
+            } else if (!input.capacity || shell_has_output()) {
+                const unsigned int size = app_drain_output(slot, bytes,
+                    shell_has_output() ? sizeof(bytes) : WIDTH);
+                if (size) {
+                    if (shell_has_output()) {
+                        if (!shell_capture(bytes, size)) {
+                            finish_text(&output);
+                            return (struct app_result){ .status = APP_OUTPUT_ERROR };
+                        }
+                    } else {
+                        text_chunk(&output, bytes, size);
+                    }
+                    progress = 1;
+                }
+            }
+        }
+
+        const int ready = app_ready();
+        /* Desktop actions can print diagnostics. Keep those out of the pipeline. */
+        shell_set_stream(0);
+        const unsigned int key = shell_poll_job_key(row, input.capacity && (*live & 1));
+        shell_set_stream(stream);
+        if (key == KEY_INTERRUPT) {
+            result = (struct app_result){ .status = APP_INTERRUPTED };
+            break;
+        }
+        if (input.capacity && (*live & 1) && key)
+            input_key(&input, &output, key);
+        if (!ready && !progress && !key && !app_ready())
+            __asm__ volatile ("hlt" : : : "memory");
+    }
+    finish_text(&output);
+    return result;
+}
+
+void shell_run_apps(unsigned int *row, const unsigned char *const *arguments,
+    unsigned int count, struct shell_stream *stream)
+{
+    struct ata_disk disk;
+    struct fat16_volume volume;
+    if (!shell_open_volume(row, &disk, &volume))
+        return;
+
+    struct app_pipe pipes[APP_JOB_LIMIT - 1] = {0};
+    unsigned int live = 0;
+    struct app_result result = { .status = APP_STARTED };
+    for (unsigned int i = 0; i < count; ++i) {
+        unsigned char args[APP_ARG_BYTES];
+        struct app_launch launch;
+        struct fat16_file file;
+        if (!prepare_app(row, arguments[i], args, &launch, &volume, &file))
+            break;
+        result.status = app_start(APP_PROCESS_LIMIT + i, &volume, &file, &launch);
+        if (result.status != APP_STARTED)
+            break;
+        live |= 1u << i;
+
+        if (i + 1 < count && !(pipes[i].bytes = page_alloc())) {
+            result.status = APP_NO_MEMORY;
+            break;
+        }
+    }
+    if (result.status == APP_STARTED && live == (1u << count) - 1)
+        result = run_apps(row, count, &live, pipes, stream);
+    release_apps(&live, count);
+    for (unsigned int i = 1; i < count; ++i)
+        if (pipes[i - 1].bytes)
+            page_free(pipes[i - 1].bytes);
+    report_app_result(row, result);
+}
+
+void shell_run_app(unsigned int *row, const unsigned char *argument)
+{
+#ifdef GPT_R_GRAPHICS
+    struct ata_disk disk;
+    struct fat16_volume volume;
+    struct fat16_file file;
+    unsigned char args[APP_ARG_BYTES];
+    struct app_launch launch;
+    if (shell_open_volume(row, &disk, &volume) &&
+        prepare_app(row, argument, args, &launch, &volume, &file)) {
+        const enum app_status status = desktop_open_app(&volume, &file, &launch);
+        report_app_result(row, (struct app_result){ .status = status });
+    }
+#else
+    shell_run_apps(row, &argument, 1, 0);
+#endif
 }
 
 const char *shell_file_error(enum fat16_edit_result result)

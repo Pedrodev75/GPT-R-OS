@@ -19,7 +19,7 @@ struct file_table {
     struct handle handles[APP_HANDLE_LIMIT];
 };
 
-static struct file_table tables[APP_PROCESS_LIMIT];
+static struct file_table tables[APP_PROCESS_SLOTS];
 
 void app_files_begin(unsigned int slot, const struct fat16_volume *volume,
     const struct fat16_path *directory)
@@ -57,7 +57,7 @@ static int equal_alias(const unsigned char *a, const unsigned char *b)
 
 static int output_in_use(const struct file_table *table, const struct fat16_location *entry)
 {
-    for (unsigned int slot = 0; slot < APP_PROCESS_LIMIT; ++slot) {
+    for (unsigned int slot = 0; slot < APP_PROCESS_SLOTS; ++slot) {
         if (table->volume.fat_start != tables[slot].volume.fat_start)
             continue;
         for (unsigned int i = 0; i < APP_HANDLE_LIMIT; ++i) {
@@ -246,4 +246,13 @@ int app_files_finish(unsigned int slot, int commit)
         }
     }
     return result;
+}
+
+unsigned int app_files_pages(unsigned int slot)
+{
+    unsigned int count = 0;
+    for (unsigned int i = 0; i < APP_HANDLE_LIMIT; ++i)
+        for (unsigned int page = 0; page < BUFFER_PAGES; ++page)
+            count += tables[slot].handles[i].pages[page] != 0;
+    return count;
 }

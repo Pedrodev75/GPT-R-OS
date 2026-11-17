@@ -347,9 +347,11 @@ enum fat16_edit_result fat16_check_write(const struct fat16_volume *vol, unsigne
     return entry.lba || entry.tail ? FAT16_EDIT_OK : FAT16_EDIT_FULL;
 }
 
+enum { WRITE_EXCLUSIVE = 1, WRITE_ORIGINAL_NAME = 2 };
+
 static enum fat16_edit_result write_source(const struct fat16_volume *vol, unsigned int directory,
     const unsigned char *text_name, unsigned int name_size, unsigned int length,
-    fat16_sector_source source, void *context, int exclusive)
+    fat16_sector_source source, void *context, unsigned int flags)
 {
     struct short_name name;
     if (!encode_name(&name, text_name, name_size))
@@ -359,10 +361,10 @@ static enum fat16_edit_result write_source(const struct fat16_volume *vol, unsig
         return FAT16_EDIT_SIZE;
 
     struct edit_entry entry;
-    enum fat16_edit_result result = find_entry(vol, directory, &name, &entry, exclusive);
+    enum fat16_edit_result result = find_entry(vol, directory, &name, &entry, flags & WRITE_EXCLUSIVE);
     if (result != FAT16_EDIT_OK)
         return result;
-    if (!entry.exists && uppercase_txt(&name))
+    if (!entry.exists && !(flags & WRITE_ORIGINAL_NAME) && uppercase_txt(&name))
         return FAT16_EDIT_TEXT_EXTENSION;
     result = prepare_slot(vol, &entry);
     if (result != FAT16_EDIT_OK)
@@ -461,7 +463,7 @@ enum fat16_edit_result fat16_write_at(const struct fat16_volume *vol, unsigned i
 enum fat16_edit_result fat16_create(const struct fat16_volume *vol, unsigned int directory,
     const unsigned char *name, unsigned int name_size)
 {
-    return write_source(vol, directory, name, name_size, 0, 0, 0, 1);
+    return write_source(vol, directory, name, name_size, 0, 0, 0, WRITE_EXCLUSIVE);
 }
 
 enum fat16_edit_result fat16_write(const struct fat16_volume *vol,
@@ -550,15 +552,15 @@ static enum fat16_edit_result rename_entry(const struct fat16_volume *vol,
     return FAT16_EDIT_OK;
 }
 
-enum fat16_edit_result fat16_transfer(const struct fat16_volume *vol,
+static enum fat16_edit_result transfer_file(const struct fat16_volume *vol,
     unsigned int from, const unsigned char *old_name, unsigned int to,
-    const unsigned char *new_name, int move)
+    const unsigned char *new_name, int move, unsigned int flags)
 {
     struct short_name old, next;
     const unsigned int old_length = name_length(old_name), new_length = name_length(new_name);
     if (!encode_name(&old, old_name, old_length) || !encode_name(&next, new_name, new_length))
         return FAT16_EDIT_NAME;
-    if (uppercase_txt(&next))
+    if (!(flags & WRITE_ORIGINAL_NAME) && uppercase_txt(&next))
         return FAT16_EDIT_TEXT_EXTENSION;
     struct edit_entry origin, destination;
     enum fat16_edit_result result = find_entry(vol, from, &old, &origin, 0);
@@ -580,10 +582,24 @@ enum fat16_edit_result fat16_transfer(const struct fat16_volume *vol,
 
     /* Give the destination its own FAT chain before touching the source entry. */
     struct file_source source = { .volume = vol, .cluster = origin.first_cluster };
-    result = write_source(vol, to, new_name, new_length, origin.size, disk_sector, &source, 1);
+    result = write_source(vol, to, new_name, new_length, origin.size, disk_sector, &source,
+        flags | WRITE_EXCLUSIVE);
     if (result != FAT16_EDIT_OK || !move)
         return result;
     if (!update_directory(vol, &origin, 0, 0, 0, 0))
         return FAT16_EDIT_PARTIAL;
     return release_chain(vol, origin.first_cluster) ? FAT16_EDIT_OK : FAT16_EDIT_CLEANUP;
+}
+
+enum fat16_edit_result fat16_transfer(const struct fat16_volume *vol,
+    unsigned int from, const unsigned char *old_name, unsigned int to,
+    const unsigned char *new_name, int move)
+{
+    return transfer_file(vol, from, old_name, to, new_name, move, 0);
+}
+
+enum fat16_edit_result fat16_restore_file(const struct fat16_volume *vol,
+    unsigned int from, const unsigned char *old_name, unsigned int to, const unsigned char *original_name)
+{
+    return transfer_file(vol, from, old_name, to, original_name, 1, WRITE_ORIGINAL_NAME);
 }

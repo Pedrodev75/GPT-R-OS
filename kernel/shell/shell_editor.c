@@ -608,10 +608,15 @@ const char *shell_edit_file(const struct fat16_volume *volume, unsigned int dire
     return 0;
 }
 
+int shell_editor_has_file(unsigned int directory, const unsigned char *name)
+{
+    return filename_size && directory == current_directory && shell_equals(name, (const char *)filename);
+}
+
 void shell_editor_moved(unsigned int from, const unsigned char *old_name,
     unsigned int to, const unsigned char *new_name)
 {
-    if (!filename_size || from != current_directory || !shell_equals(old_name, (const char *)filename))
+    if (!shell_editor_has_file(from, old_name))
         return;
     filename_size = 0;
     while (new_name[filename_size]) {

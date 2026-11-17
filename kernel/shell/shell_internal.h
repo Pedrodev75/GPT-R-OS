@@ -35,7 +35,7 @@ void shell_print_error(unsigned int *row, const char *text);
 void shell_mark_error(void);
 
 unsigned int shell_wait_key(void);
-void shell_discard_input(void);
+unsigned int shell_poll_job_key(unsigned int *row, int reading);
 void shell_move_cursor(unsigned int row, unsigned int col);
 void shell_clear_row(unsigned int row);
 void shell_next_row(unsigned int *row);
@@ -69,6 +69,8 @@ void shell_cp(unsigned int *row, const unsigned char *argument);
 void shell_mv(unsigned int *row, const unsigned char *argument);
 void shell_ls(unsigned int *row, const unsigned char *argument);
 void shell_run_app(unsigned int *row, const unsigned char *argument);
+void shell_run_apps(unsigned int *row, const unsigned char *const *arguments,
+    unsigned int count, struct shell_stream *stream);
 int shell_open_volume(unsigned int *row, struct ata_disk *disk, struct fat16_volume *volume);
 int shell_lookup_file(const struct fat16_volume *volume,
     const unsigned char *name, struct fat16_file *file);
@@ -82,6 +84,7 @@ const char *shell_edit_file(const struct fat16_volume *volume, unsigned int dire
     const unsigned char *name, const struct fat16_file *file);
 void shell_editor_moved(unsigned int from, const unsigned char *old_name,
     unsigned int to, const unsigned char *new_name);
+int shell_editor_has_file(unsigned int directory, const unsigned char *name);
 void shell_editor_draw(unsigned int x, unsigned int y, int full);
 int shell_editor_key(unsigned int key);
 void shell_assemble(unsigned int *row, const unsigned char *argument);

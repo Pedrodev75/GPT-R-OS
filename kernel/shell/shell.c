@@ -1,5 +1,6 @@
 #include "shell.h"
 #include "shell_internal.h"
+#include "../apps/app.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/timer.h"
 #include "../desktop/desktop.h"
@@ -87,6 +88,18 @@ static const unsigned char *argument_for(const unsigned char *input, const char 
 
 
 static struct keyboard_state keyboard;
+static unsigned int deferred_keys[MAX_INPUT + 1];
+static unsigned int deferred_first, deferred_count;
+
+static unsigned int take_deferred_key(void)
+{
+    if (!deferred_count)
+        return 0;
+    const unsigned int key = deferred_keys[deferred_first];
+    deferred_first = (deferred_first + 1) % (MAX_INPUT + 1);
+    --deferred_count;
+    return key;
+}
 
 static void command_clear(unsigned int *row, const unsigned char *argument)
 {
@@ -305,7 +318,7 @@ static unsigned int show_input(unsigned int row, unsigned int prompt,
     return prompt + length - first;
 }
 
-enum { PIPE_STAGES = 8 };
+enum { PIPE_STAGES = APP_JOB_LIMIT };
 
 struct shell_stage {
     const struct command *command;
@@ -355,6 +368,8 @@ static void run_pipeline(unsigned int *row, const struct shell_stage *stages,
     struct ata_disk disk;
     struct fat16_volume volume;
     struct fat16_location target;
+    struct fat16_file original;
+    int existed = 0;
     unsigned int name_size = 0;
     if (redirect) {
         unsigned char path[FAT16_PATH_CAPACITY];
@@ -378,17 +393,39 @@ static void run_pipeline(unsigned int *row, const struct shell_stage *stages,
             shell_report_file_edit(row, result, "Falha ao abrir destino");
             return;
         }
+        existed = fat16_lookup_at(&volume, target.directory, target.name, &original);
+        if (existed < 0) {
+            shell_print_error(row, "Falha ao ler o destino");
+            return;
+        }
     }
 
     struct shell_buffer buffers[2] = {0};
     struct shell_buffer *input = 0, *output = 0;
     int failed = 0;
-    for (unsigned int i = 0; i < count; ++i) {
-        output = i + 1 < count || redirect ? &buffers[i % 2] : 0;
+    for (unsigned int i = 0; i < count;) {
+        const unsigned char *apps[APP_JOB_LIMIT];
+        unsigned int app_count = 0, next = i + 1;
+        if (stages[i].command->run == shell_run_app) {
+            apps[app_count++] = stages[i].argument;
+            for (; next < count; ++next) {
+                if (stages[next].command->run == shell_run_app) {
+                    apps[app_count++] = stages[next].argument;
+                } else if (stages[next].command->run != shell_cat ||
+                    *shell_skip_spaces(stages[next].argument)) {
+                    break;
+                }
+            }
+        }
+        output = next < count || redirect ? (input == &buffers[0] ? &buffers[1] : &buffers[0]) : 0;
         struct shell_stream stream = { .input = input, .output = output };
         shell_set_stream(&stream);
-        stages[i].command->run(row, stages[i].argument);
+        if (app_count)
+            shell_run_apps(row, apps, app_count, &stream);
+        else
+            stages[i].command->run(row, stages[i].argument);
         shell_set_stream(0);
+        i = next;
         if (input)
             shell_buffer_clear(input);
         if (output && output->error)
@@ -399,10 +436,20 @@ static void run_pipeline(unsigned int *row, const struct shell_stage *stages,
         input = output;
     }
     if (redirect && !failed) {
-        const enum fat16_edit_result result = fat16_write_stream_at(&volume,
-            target.directory, target.name, name_size, output->size, redirect_sector, output);
-        if (result != FAT16_EDIT_OK)
-            shell_report_file_edit(row, result, "Falha ao gravar destino");
+        struct fat16_file current;
+        const int found = fat16_lookup_at(&volume, target.directory, target.name, &current);
+        if (found < 0) {
+            shell_print_error(row, "Falha ao ler o destino");
+        } else if (found != existed || (found &&
+            (original.first_cluster != current.first_cluster || original.size != current.size ||
+             original.modified_date != current.modified_date))) {
+            shell_print_error(row, "O destino mudou durante o comando");
+        } else {
+            const enum fat16_edit_result result = fat16_write_stream_at(&volume,
+                target.directory, target.name, name_size, output->size, redirect_sector, output);
+            if (result != FAT16_EDIT_OK)
+                shell_report_file_edit(row, result, "Falha ao gravar destino");
+        }
     }
     shell_buffer_clear(&buffers[0]);
     shell_buffer_clear(&buffers[1]);
@@ -462,18 +509,36 @@ static void execute(unsigned int *row, unsigned char *line, unsigned int length)
 
 unsigned int shell_wait_key(void)
 {
-    return keyboard_wait(&keyboard);
+    const unsigned int key = take_deferred_key();
+    return key ? key : keyboard_wait(&keyboard);
 }
 
-void shell_discard_input(void)
+unsigned int shell_poll_job_key(unsigned int *row, int reading)
 {
-    while (keyboard_poll(&keyboard)) {}
-    keyboard.accent = 0;
+#ifdef GPT_R_GRAPHICS
+    const unsigned int key = desktop_poll_key(&keyboard, row);
+#else
+    (void)row;
+    if (app_ready())
+        app_schedule();
+    const unsigned int key = keyboard_poll(&keyboard);
+#endif
+    if (key == KEY_INTERRUPT) {
+        deferred_count = 0;
+        return key;
+    }
+    if (key && deferred_count < MAX_INPUT + 1) {
+        const unsigned int tail = (deferred_first + deferred_count) % (MAX_INPUT + 1);
+        deferred_keys[tail] = key;
+        ++deferred_count;
+    }
+    return reading ? take_deferred_key() : 0;
 }
 
 _Noreturn void shell_run(unsigned int row)
 {
     keyboard = (struct keyboard_state){0};
+    deferred_first = deferred_count = 0;
     history.next = history.count = 0;
     unsigned char line[MAX_INPUT + 1], draft[MAX_INPUT + 1];
     shell_memory_init();
@@ -488,7 +553,9 @@ _Noreturn void shell_run(unsigned int row)
             const unsigned int col = show_input(row, prompt, line, length);
             shell_move_cursor(row, col < WIDTH ? col : WIDTH - 1);
 #ifdef GPT_R_GRAPHICS
-            const unsigned int key = desktop_wait_key(&keyboard, &row);
+            unsigned int key = take_deferred_key();
+            if (!key)
+                key = desktop_wait_key(&keyboard, &row);
             vga_graphics_cursor(WIDTH * HEIGHT);
 #else
             const unsigned int key = shell_wait_key();

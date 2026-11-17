@@ -76,6 +76,8 @@ enum fat16_edit_result fat16_create(const struct fat16_volume *volume,
 enum fat16_edit_result fat16_transfer(const struct fat16_volume *volume,
     unsigned int from, const unsigned char *old_name, unsigned int to,
     const unsigned char *new_name, int move);
+enum fat16_edit_result fat16_restore_file(const struct fat16_volume *volume,
+    unsigned int from, const unsigned char *old_name, unsigned int to, const unsigned char *original_name);
 enum fat16_edit_result fat16_remove_at(const struct fat16_volume *volume,
     unsigned int directory, const unsigned char *name, unsigned int name_size);
 unsigned int fat16_mutations(void);

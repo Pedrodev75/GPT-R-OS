@@ -14,5 +14,6 @@ int app_file_read(unsigned int slot, unsigned int handle, unsigned char *data, u
 int app_file_write(unsigned int slot, unsigned int handle, const unsigned char *data, unsigned int size);
 int app_file_close(unsigned int slot, unsigned int handle, int commit);
 int app_files_finish(unsigned int slot, int commit);
+unsigned int app_files_pages(unsigned int slot);
 
 #endif

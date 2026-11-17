@@ -20,6 +20,7 @@ enum app_status desktop_open_app(const struct fat16_volume *volume, const struct
 void desktop_shortcut_added(unsigned int index);
 void desktop_open_editor(const unsigned char *name);
 unsigned int desktop_wait_key(struct keyboard_state *keyboard, unsigned int *row);
+unsigned int desktop_poll_key(struct keyboard_state *keyboard, unsigned int *row);
 #endif
 
 #endif

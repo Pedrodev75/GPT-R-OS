@@ -3,6 +3,8 @@
 #include "shortcuts.h"
 #include "file_browser.h"
 #include "task_manager.h"
+#include "settings.h"
+#include "trash.h"
 #include "../drivers/timer.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/mouse.h"
@@ -13,35 +15,24 @@
 enum {
     SCREEN_WIDTH = VGA_GRAPHICS_WIDTH, SCREEN_HEIGHT = VGA_GRAPHICS_HEIGHT,
     CELL = VGA_OVERLAY_CELL_WIDTH, BAR_HEIGHT = 52, BAR_Y = SCREEN_HEIGHT - BAR_HEIGHT,
-    MENU_X = 14, MENU_WIDTH = 300, MENU_HEIGHT = 256, MENU_Y = BAR_Y - MENU_HEIGHT - 8,
+    MENU_X = 14, MENU_WIDTH = 300, MENU_HEIGHT = 326, MENU_Y = BAR_Y - MENU_HEIGHT - 8,
     WORKSPACE = 0x101c30, PANEL = 0x142338, ACTIVE = 0x1c3850, BORDER = 0x364e6a,
     SHADOW = 0x080e19, INK = 0xe7eef8, MUTED = 0x91a8c1, ACCENT = 0x61dcf5,
-    APP_TAB_X = 731, APP_TAB_STEP = 71, APP_TAB_WIDTH = 68,
+    TAB_X = 181, TAB_STEP = 70, TAB_WIDTH = 66, CLOCK_X = 882,
     NO_SHORTCUT = SHORTCUT_COUNT, SHORTCUT_DBL_TICKS = 35, SHORTCUT_TOP = 52
 };
 
 enum window_id {
-    TERMINAL, EDITOR, EXPLORER, TASKS, FIRST_APP, NO_WINDOW = FIRST_APP + APP_PROCESS_LIMIT
+    TERMINAL, EDITOR, EXPLORER, TASKS, SETTINGS, TRASH,
+    FIRST_APP, NO_WINDOW = FIRST_APP + APP_PROCESS_LIMIT
 };
 
-struct taskbar_item {
-    unsigned int x, width;
-    const char *label;
+static const char *const builtin_names[FIRST_APP] = {
+    "Terminal", "Editor", "Arquivos", "Tarefas", "Configuracoes", "Lixeira"
 };
-
-static const struct taskbar_item builtins[FIRST_APP] = {
-    [TERMINAL] = {181, 138, "Terminal"},
-    [EDITOR] = {328, 110, "Editor"},
-    [EXPLORER] = {447, 140, "Arquivos"},
-    [TASKS] = {596, 125, "Tarefas"}
+static const char *const builtin_tabs[FIRST_APP] = {
+    "Term", "Edit", "Arq", "Tar", "Conf", "Lix"
 };
-
-static struct taskbar_item taskbar_item(enum window_id id)
-{
-    if (id < FIRST_APP)
-        return builtins[id];
-    return (struct taskbar_item){APP_TAB_X + (id - FIRST_APP) * APP_TAB_STEP, APP_TAB_WIDTH, 0};
-}
 
 struct window {
     unsigned int x, y, width, height;
@@ -63,6 +54,8 @@ static int moving_shortcut;
 static enum window_id painted_focus;
 static unsigned int painted_visible, painted_open;
 static int painted_menu;
+static unsigned int clock_hour, clock_minute, clock_checked_at;
+static int clock_valid;
 
 static void text(unsigned int x, unsigned int y, const char *label, unsigned int color)
 {
@@ -99,6 +92,15 @@ static void window_icon(enum window_id id, unsigned int x, unsigned int y, unsig
         vga_graphics_fill(x + 2, y + 9, 4, 9, color);
         vga_graphics_fill(x + 9, y + 4, 4, 14, color);
         vga_graphics_fill(x + 16, y, 4, 18, color);
+    } else if (id == SETTINGS) {
+        for (unsigned int row = 0; row < 3; ++row) {
+            vga_graphics_fill(x + 2, y + 2 + row * 6, 20, 2, color);
+            vga_graphics_fill(x + 5 + (row % 2) * 10, y + row * 6, 4, 6, color);
+        }
+    } else if (id == TRASH) {
+        vga_graphics_fill(x + 3, y + 3, 18, 2, color);
+        vga_graphics_fill(x + 9, y, 6, 2, color);
+        vga_graphics_fill(x + 6, y + 7, 12, 11, color);
     } else {
         terminal_icon(x, y, color);
     }
@@ -114,12 +116,14 @@ static void logo(unsigned int x, unsigned int y)
 
 static void desktop_background(void)
 {
-    vga_graphics_fill(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, WORKSPACE);
+    const int green = settings_green_theme();
+    vga_graphics_fill(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, green ? 0x112a27 : WORKSPACE);
     /* Stepped bands form a subdued, lower-right wallpaper. */
     for (unsigned int band = 0; band < 7; ++band) {
         const unsigned int x = 638 + band * 43;
         const unsigned int y = 345 + band * 41;
-        vga_graphics_fill(x, y, SCREEN_WIDTH - x, BAR_Y - y, 0x15253a + band * 0x010203);
+        vga_graphics_fill(x, y, SCREEN_WIDTH - x, BAR_Y - y,
+            (green ? 0x173633 : 0x15253a) + band * (green ? 0x010302 : 0x010203));
     }
     logo(23, 16);
     text(55, 15, "GPT-R OS", INK);
@@ -149,6 +153,27 @@ static void draw_window(enum window_id id, int focused, const unsigned char *nam
     text(x + width - 32, y + 8, "x", focused ? INK : MUTED);
 }
 
+static void draw_clock(void)
+{
+    char label[9] = "--:--";
+    if (clock_valid) {
+        unsigned int hour = clock_hour;
+        if (settings_clock_12h()) {
+            label[5] = ' ';
+            label[6] = hour < 12 ? 'A' : 'P';
+            label[7] = 'M';
+            hour = (hour + 11) % 12 + 1;
+        }
+        label[0] = '0' + hour / 10;
+        label[1] = '0' + hour % 10;
+        label[3] = '0' + clock_minute / 10;
+        label[4] = '0' + clock_minute % 10;
+    }
+    const unsigned int width = (label[5] ? 8 : 5) * CELL;
+    vga_graphics_fill(CLOCK_X, BAR_Y + 7, SCREEN_WIDTH - CLOCK_X - 4, 38, WORKSPACE);
+    text(CLOCK_X + (SCREEN_WIDTH - CLOCK_X - 4 - width) / 2, BAR_Y + 15, label, INK);
+}
+
 static void draw_taskbar(void)
 {
     const unsigned int top = BAR_Y + 7;
@@ -157,25 +182,20 @@ static void draw_taskbar(void)
     vga_graphics_fill(14, top, 158, 38, menu_open ? ACTIVE : WORKSPACE);
     logo(26, top + 9);
     text(55, top + 8, "F1 Menu", INK);
+    unsigned int left = TAB_X;
     for (unsigned int id = 0; id < NO_WINDOW; ++id) {
         if (!windows[id].open)
             continue;
-        const struct taskbar_item item = taskbar_item(id);
         const int focused = focus == id && !menu_open;
-        vga_graphics_fill(item.x, top, item.width, 38, focused ? ACTIVE : WORKSPACE);
-        if (id < FIRST_APP) {
-            unsigned int length = 0;
-            while (item.label[length])
-                ++length;
-            text(item.x + (item.width - CELL * length) / 2, top + 8, item.label, INK);
-        } else {
-            const char *title = windows[id].title;
-            for (unsigned int i = 0; i < 4 && title[i]; ++i)
-                vga_graphics_overlay_glyph(item.x + 3 + i * CELL, top + 8, title[i], INK);
-        }
+        vga_graphics_fill(left, top, TAB_WIDTH, 38, focused ? ACTIVE : WORKSPACE);
+        const char *label = id < FIRST_APP ? builtin_tabs[id] : windows[id].title;
+        for (unsigned int i = 0; i < 4 && label[i]; ++i)
+            vga_graphics_overlay_glyph(left + 1 + i * CELL, top + 8, label[i], INK);
         if (focused)
-            vga_graphics_fill(item.x, top + 35, item.width, 3, ACCENT);
+            vga_graphics_fill(left, top + 35, TAB_WIDTH, 3, ACCENT);
+        left += TAB_STEP;
     }
+    draw_clock();
 }
 
 static void draw_menu_items(enum window_id choice)
@@ -188,7 +208,7 @@ static void draw_menu_items(enum window_id choice)
         if (selected)
             vga_graphics_fill(MENU_X + 8, y + 4, 3, 27, ACCENT);
         window_icon(item, MENU_X + 22, y + 9, selected ? ACCENT : MUTED);
-        text(MENU_X + 60, y + 6, builtins[item].label, INK);
+        text(MENU_X + 60, y + 6, builtin_names[item], INK);
     }
 }
 
@@ -199,7 +219,7 @@ static void draw_menu(enum window_id choice)
     vga_graphics_fill(MENU_X + 1, MENU_Y + 1, MENU_WIDTH - 2, MENU_HEIGHT - 2, PANEL);
     text(MENU_X + 15, MENU_Y + 14, "Aplicativos", ACCENT);
     draw_menu_items(choice);
-    text(MENU_X + 16, MENU_Y + 219, "Setas / Enter", MUTED);
+    text(MENU_X + 16, MENU_Y + 296, "Setas / Enter", MUTED);
 }
 
 static int visible(enum window_id id)
@@ -252,6 +272,10 @@ static void paint_app(enum window_id id, struct region damage)
         browser_draw(x, y, damage.y, damage.height);
     } else if (id == TASKS) {
         tasks_draw(x, y);
+    } else if (id == SETTINGS) {
+        settings_draw(x, y);
+    } else if (id == TRASH) {
+        trash_draw(x, y);
     } else {
         app_window_draw(id - FIRST_APP, x, y, focus == id && !menu_open,
             damage.y, damage.height);
@@ -369,12 +393,33 @@ static void repaint_client(enum window_id id)
     present_scene();
 }
 
+static void service_clock(void)
+{
+    const unsigned int now = timer_ticks();
+    if (now - clock_checked_at < TIMER_TICKS_PER_SECOND)
+        return;
+    clock_checked_at = now;
+    unsigned int hour, minute;
+    if (!rtc_read_time(&hour, &minute) ||
+        (clock_valid && hour == clock_hour && minute == clock_minute))
+        return;
+    clock_valid = 1;
+    clock_hour = hour;
+    clock_minute = minute;
+    begin_scene();
+    compose_region((struct region){CLOCK_X, BAR_Y + 7, SCREEN_WIDTH - CLOCK_X, 38});
+    present_scene();
+}
+
 static void service_tools(void)
 {
+    service_clock();
     if (visible(EXPLORER) && browser_busy() && browser_step())
         repaint_client(EXPLORER);
     if (windows[TASKS].open && tasks_refresh())
         repaint_client(TASKS);
+    if (windows[TRASH].open && trash_refresh())
+        repaint_client(TRASH);
 }
 
 static void repaint_app_output(int immediate)
@@ -478,6 +523,8 @@ void desktop_init(void)
     };
     windows[EXPLORER] = (struct window){112, 93, BROWSER_WIDTH, BROWSER_HEIGHT, "Arquivos", 0, 0};
     windows[TASKS] = (struct window){196, 198, TASKS_WIDTH, TASKS_HEIGHT, "Gerenciador de tarefas", 0, 0};
+    windows[SETTINGS] = (struct window){227, 202, SETTINGS_WIDTH, SETTINGS_HEIGHT, "Configuracoes", 0, 0};
+    windows[TRASH] = (struct window){86, 132, TRASH_WIDTH, TRASH_HEIGHT, "Lixeira", 0, 0};
     for (unsigned int i = 0; i < NO_WINDOW; ++i)
         window_order[i] = i;
     for (unsigned int slot = 0; slot < APP_PROCESS_LIMIT; ++slot) {
@@ -495,6 +542,9 @@ void desktop_init(void)
     selected_shortcut = pressed_shortcut = previous_shortcut = NO_SHORTCUT;
     moving_shortcut = 0;
     shortcuts_init();
+    settings_init();
+    clock_valid = rtc_read_time(&clock_hour, &clock_minute);
+    clock_checked_at = timer_ticks();
     desktop_repaint();
 }
 
@@ -620,6 +670,18 @@ int desktop_end_task(unsigned int pid)
     return 0;
 }
 
+int desktop_focus_task(unsigned int pid)
+{
+    for (unsigned int slot = 0; slot < APP_PROCESS_LIMIT; ++slot) {
+        const enum window_id id = FIRST_APP + slot;
+        if (windows[id].open && app_task_info(slot).pid == pid) {
+            focus_window(id);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void launch(enum window_id choice, unsigned int *row)
 {
     menu_open = 0;
@@ -633,6 +695,8 @@ static void launch(enum window_id choice, unsigned int *row)
         browser_init();
     if (choice == TASKS && !windows[TASKS].open)
         tasks_init();
+    if (choice == TRASH && !windows[TRASH].open)
+        trash_init();
     focus_window(choice);
 }
 
@@ -800,15 +864,18 @@ static void click(unsigned int *row)
         toggle_menu();
         return;
     }
+    unsigned int tab_x = TAB_X;
     for (unsigned int id = 0; id < NO_WINDOW; ++id) {
-        const struct taskbar_item item = taskbar_item(id);
-        if (windows[id].open && hit(x, y, item.x, BAR_Y + 7, item.width, 38)) {
+        if (!windows[id].open)
+            continue;
+        if (hit(x, y, tab_x, BAR_Y + 7, TAB_WIDTH, 38)) {
             if (focus == id)
                 hide_window(id, 0);
             else
                 focus_window(id);
             return;
         }
+        tab_x += TAB_STEP;
     }
 
     const enum window_id id = pointed_window();
@@ -825,8 +892,11 @@ static void click(unsigned int *row)
         if (!client_coordinates(id, &local_x, &local_y))
             return;
         if ((id == EXPLORER && browser_click(local_x, local_y)) ||
-            (id == TASKS && tasks_click(local_x, local_y))) {
+            (id == TASKS && tasks_click(local_x, local_y)) ||
+            (id == TRASH && trash_click(local_x, local_y))) {
             repaint_client(id);
+        } else if (id == SETTINGS && settings_click(local_x, local_y)) {
+            desktop_repaint();
         } else if (id >= FIRST_APP) {
             app_deliver_click(id - FIRST_APP, local_x, local_y);
         }
@@ -919,7 +989,7 @@ static void run_slice(void)
     repaint_app_output(0);
 }
 
-unsigned int desktop_wait_key(struct keyboard_state *keyboard, unsigned int *row)
+static unsigned int terminal_key(struct keyboard_state *keyboard, unsigned int *row, int wait)
 {
     for (;;) {
         struct mouse_event event;
@@ -933,6 +1003,8 @@ unsigned int desktop_wait_key(struct keyboard_state *keyboard, unsigned int *row
             ++events_since_slice;
             mouse_event(&event, row);
             repaint_app_output(0);
+            if (!wait)
+                return 0;
             continue;
         }
         const unsigned int key = keyboard_poll(keyboard);
@@ -940,17 +1012,24 @@ unsigned int desktop_wait_key(struct keyboard_state *keyboard, unsigned int *row
             if (app_ready()) {
                 __asm__ volatile ("sti" : : : "memory");
                 run_slice();
-            } else if (visible(EXPLORER) && browser_busy()) {
+            } else if (!wait || (visible(EXPLORER) && browser_busy())) {
                 __asm__ volatile ("sti" : : : "memory");
             } else {
                 __asm__ volatile ("sti; hlt" : : : "memory");
                 repaint_app_output(0);
             }
+            if (!wait)
+                return 0;
             continue;
         }
         __asm__ volatile ("sti" : : : "memory");
         ++events_since_slice;
 
+        if (!wait && key == KEY_INTERRUPT && focus == TERMINAL) {
+            if (menu_open)
+                toggle_menu();
+            return key;
+        }
         if (key == KEY_F1) {
             toggle_menu();
         } else if (key == KEY_SWITCH_WINDOW) {
@@ -986,6 +1065,16 @@ unsigned int desktop_wait_key(struct keyboard_state *keyboard, unsigned int *row
                 hide_window(TASKS, 1);
             else if (tasks_key(key))
                 repaint_client(TASKS);
+        } else if (focus == SETTINGS) {
+            if (key == KEY_ESCAPE)
+                hide_window(SETTINGS, 1);
+            else if (settings_key(key))
+                desktop_repaint();
+        } else if (focus == TRASH) {
+            if (key == KEY_ESCAPE)
+                hide_window(TRASH, 1);
+            else if (trash_key(key))
+                repaint_client(TRASH);
         } else if (focus >= FIRST_APP && focus < NO_WINDOW) {
             app_window_key(focus - FIRST_APP, key);
             repaint_app_output(1);
@@ -998,7 +1087,19 @@ unsigned int desktop_wait_key(struct keyboard_state *keyboard, unsigned int *row
                 return key;
             }
         }
+        if (!wait)
+            return 0;
     }
+}
+
+unsigned int desktop_wait_key(struct keyboard_state *keyboard, unsigned int *row)
+{
+    return terminal_key(keyboard, row, 1);
+}
+
+unsigned int desktop_poll_key(struct keyboard_state *keyboard, unsigned int *row)
+{
+    return terminal_key(keyboard, row, 0);
 }
 
 #endif
