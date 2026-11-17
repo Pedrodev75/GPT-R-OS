@@ -2,17 +2,19 @@
 
 Sistema operacional experimental x86-64 escrito em C e Assembly. Inicia via BIOS com bootloader próprio e é desenvolvido para testes no QEMU.
 
-A **v0.6.5** adiciona um Explorador de arquivos com subpastas FAT16, um Gerenciador de tarefas e atalhos salvos no disco. A **Calculadora** é o primeiro `.APP` com interface gráfica e botões clicáveis. O desktop roda em **1024×768** via VBE, com mouse PS/2 e fonte bitmap em escala 2×. O Terminal tem 56 colunas por 27 linhas.
+A **v0.7.0** traz pipes e redirecionamento no Terminal, acesso a arquivos e alocação de memória para aplicativos GTRA, métricas de processos, relógio, configurações persistentes e Lixeira. A Central de Aplicativos instala pacotes `.PKG` no formato GTRP v1, incluindo o **Jogo da Velha**. O Editor ganhou indentação automática, desfazer, refazer e destaque de sintaxe Assembly.
+
+O desktop roda em **1024×768** via VBE, com mouse PS/2 e fonte bitmap em escala 2×. O Terminal tem 56 colunas por 27 linhas.
 
 O desktop recompõe apenas as áreas afetadas quando um app gráfico atualiza a janela. O Explorador evita reler a pasta aberta quando as alterações no FAT16 afetam outra pasta.
 
 ## Rodar no QEMU
 
-Coloque `gpt-r-hd.img` em uma pasta e abra o PowerShell nela. A imagem contém o bootloader, o kernel e a partição FAT16 com os arquivos de exemplo. Ajuste o caminho do QEMU se ele foi instalado em outra pasta.
+Abra o PowerShell na pasta que contém `gpt-r-build.img`. A imagem contém o bootloader, o kernel e a partição FAT16 com os arquivos de exemplo. Ajuste o caminho do QEMU conforme a sua instalação. Depois do boot, digite `version` no Terminal para conferir a versão.
 
 ```powershell
 & "C:\Program Files\qemu\qemu-system-x86_64.exe" -m 128 `
-  -drive "file=gpt-r-hd.img,format=raw,if=ide,index=0,snapshot=on" -boot c
+  -drive "file=gpt-r-build.img,format=raw,if=ide,index=0,snapshot=on" -boot c
 ```
 
 Com `snapshot=on`, as alterações no disco ficam em uma camada temporária e são descartadas ao fechar o QEMU.
@@ -31,20 +33,34 @@ O Terminal abre com o sistema. Clique duas vezes em **Home** ou **Apps** no desk
 
 ### Explorador e atalhos
 
-Abra **F1 → Arquivos** para ver a raiz do disco. A lista exibe ícones, nomes, tipos e tamanhos em bytes. Use **Nova pasta** para criar uma subpasta, **Voltar** para visitar o local anterior e **Subir** para ir à pasta acima. Duplo clique ou **Enter** abre a pasta selecionada, abre `.txt` e `.asm` no Editor ou executa um `.APP`. O Editor salva no mesmo diretório em que o arquivo foi aberto.
+Abra **F1 → Arquivos** para ver a raiz do disco. A lista exibe ícones, nomes, tipos e tamanhos em bytes. Use **Nova pasta** para criar uma subpasta, **Voltar** para visitar o local anterior e **Subir** para ir à pasta acima. Duplo clique ou **Enter** abre a pasta selecionada, abre `.txt` e `.asm` no Editor, executa `.APP` ou abre a prévia de `.PKG` na Central. O Editor salva no mesmo diretório em que o arquivo foi aberto.
 
 | Pasta | Conteúdo |
 |---|---|
 | `HOME/DOCS/` | Espaço para documentos de texto. |
 | `HOME/FONTES/` | Fontes Assembly. Inclui uma cópia de `ola.asm`. |
 | `APPS/` | Programas instalados, incluindo `CALC.APP`. |
-| `CONFIG/` | Dados do desktop. O sistema grava os atalhos em `ATALHOS.DAT`. |
+| `CONFIG/` | Atalhos em `ATALHOS.DAT` e preferências do desktop em `DESKTOP.DAT`. |
 
 Clique com o botão direito em um item do Explorador e escolha **Criar atalho**. Arraste o ícone no desktop para mudar sua posição. Para conferir se a posição persiste depois de fechar o QEMU, use o modo de disco gravável descrito em [Testar a persistência](#testar-a-persistência).
 
 ### Gerenciador de tarefas
 
-Abra **F1 → Tarefas** para ver o PID, o nome, o estado e a visibilidade da janela de cada `.APP`. Selecione um processo e clique em **Encerrar APP**, inclusive se a janela estiver minimizada. O kernel libera a memória do processo e a janela mostra o resultado até você fechá-la.
+Abra **F1 → Tarefas** para ver o PID, o estado, o uso de CPU em modo usuário, a memória em KiB e o tempo decorrido dos `.APP`. Selecione um processo e clique em **Encerrar**, inclusive se a janela estiver minimizada. O kernel libera a memória do processo e a janela mostra o resultado até você fechá-la.
+
+### Relógio, Configurações e Lixeira
+
+O relógio do desktop usa o RTC. Em **F1 → Configurações**, use **1** para trocar o tema e **2** para alternar entre 12 e 24 horas. As duas preferências são gravadas no FAT16.
+
+No Explorador, selecione um arquivo e pressione **Delete** para enviá-lo à Lixeira. Em **F1 → Lixeira**, selecione o item e clique em **Restaurar** para devolvê-lo ao caminho original. Se esse nome estiver em uso, a Lixeira preserva os dois arquivos.
+
+### Central de Aplicativos e Jogo da Velha
+
+1. Abra `VELHA.PKG` pelo Explorador ou digite `pkg VELHA.PKG` no Terminal.
+2. Confira os dados do pacote e clique em **Instalar**.
+3. Em **F1 → Central Apps**, selecione **Jogo da Velha** e clique em **Executar**. X começa. Clique em **Reiniciar** para limpar o tabuleiro ou em **Sair** para encerrar o jogo.
+
+A Central registra instalações em `/APPS/<ID>/PKG.DAT`. Desinstalar remove os arquivos do pacote cujo conteúdo permanece igual ao original. Os arquivos modificados e os arquivos do usuário ficam na pasta. Veja os detalhes do formato, a recuperação de operações e os limites em [Bloco 5](docs/bloco5.md).
 
 ### Calculadora gráfica
 
@@ -87,10 +103,14 @@ Digite no prompt `>` e pressione **Enter**. Use **↑** e **↓** para navegar p
 | `crash <tipo>` | Aciona um teste de diagnóstico. |
 | `diskinfo` | Mostra o modelo e a capacidade do disco ATA primário, além do espaço total e livre para arquivos no FAT16. |
 | `sector <LBA>` | Mostra os primeiros 16 bytes de um setor. Informe o LBA em decimal. |
-| `ls` | Lista os nomes, os tamanhos em bytes e as datas de modificação gravadas no diretório raiz do FAT16. |
+| `ls [pasta]` | Lista nomes, tamanhos e datas de modificação. Sem argumento, usa o diretório atual. |
+| `pwd` e `cd <pasta>` | Mostram o diretório atual e mudam para outra pasta. |
+| `mkdir <pasta>` | Cria uma subpasta. |
+| `cp <origem> <destino>` e `mv <origem> <destino>` | Copiam, movem ou renomeiam arquivos. |
 | `cat <arquivo>` | Exibe um arquivo de texto UTF-8 com paginação. |
 | `run <arquivo.APP> [argumentos]` | Executa um programa x86-64 em modo usuário e abre uma janela com o nome do executável. |
-| `edit <arquivo>` | Abre o editor gráfico de texto UTF-8. |
+| `edit <arquivo>` | Abre um `.txt` ou `.asm` no Editor gráfico. |
+| `pkg <arquivo.PKG>` | Abre a prévia do pacote na Central de Aplicativos. |
 | `asm <fonte.asm> <saida.APP>` | Monta um fonte Assembly e grava um executável no FAT16. |
 | `appinfo <arquivo.APP>` | Valida e mostra o cabeçalho do executável. |
 | `write <arquivo> <texto>` | Cria ou sobrescreve um arquivo de texto UTF-8. Aceita os acentos digitáveis no layout ABNT2. |
@@ -105,9 +125,18 @@ O heap aceita de 1 a 4.064 bytes por alocação. O shell mantém até 32 blocos 
 
 Use `ls` para encontrar `README.txt` e `cat README.txt` para ler o arquivo. Na pausa do `cat`, **Espaço** avança uma página, **Enter** avança uma linha e **Esc** volta ao prompt. Ao chegar ao fim, aparece `FIM DO ARQUIVO - FAT16 OK`.
 
-O Explorador navega por subpastas FAT16. Os comandos de arquivos do shell operam no diretório raiz. O FAT16 usa nomes curtos 8.3. Digite o nome exatamente como aparece no `ls`. Para criar arquivos, use letras sem acento, números, hífen ou sublinhado. Use uma única caixa em cada parte do nome e a extensão `.txt` em minúsculas para novos arquivos de texto. Em `nota.txt`, por exemplo, tanto o nome quanto a extensão estão em minúsculas.
+Os comandos de arquivos aceitam caminhos absolutos, como `/HOME/DOCS/nota.txt`, e caminhos relativos ao diretório atual do shell. O FAT16 usa nomes curtos 8.3. Digite o nome exatamente como aparece no `ls`. Para criar arquivos, use letras sem acento, números, hífen ou sublinhado. Use uma única caixa em cada parte do nome e a extensão `.txt` em minúsculas para novos arquivos de texto.
 
 Use `diskinfo` antes e depois de `write nota.txt Pão com ovo` para ver o espaço livre mudar. Leia o resultado com `cat nota.txt` e use `rm nota.txt` para liberar os clusters do arquivo. O comando `sector 0` inspeciona os primeiros bytes do MBR. Na imagem de exemplo, a partição FAT16 começa no setor 2048.
+
+### Pipes e redirecionamento
+
+Use `|` para enviar a saída de um comando à entrada da próxima etapa e `>` ao final para gravar a saída em um arquivo. Aplicativos iniciados por `run` em um pipe usam a entrada e a saída do Terminal. Por exemplo, este comando executa `ola.APP`, repassa a saída por `cat` e grava o texto em `saida.txt`.
+
+```text
+run ola.APP | cat > saida.txt
+cat saida.txt
+```
 
 ### Executar vários programas
 
@@ -132,21 +161,23 @@ run feito.APP
 
 O programa imprime a sua mensagem na janela `feito.APP` e sai com código 0. O montador suporta registradores de 32 e 64 bits, operações aritméticas, memória, saltos condicionais e rotinas com `call` e `ret`. Veja a sintaxe completa, um exemplo de leitura do teclado e os testes de exceção na [documentação do formato .APP](docs/app-format.md).
 
-O editor aceita texto UTF-8 de até 4 KiB e salva as quebras de linha em LF. Se houver alterações pendentes ao apertar **Esc**, ele oferece salvar, descartar ou continuar.
+O Editor aceita texto UTF-8 de até 4 KiB. **Enter** mantém a indentação, **Tab** avança até a próxima coluna múltipla de quatro e **Shift+Tab** remove um nível inicial de indentação. **Ctrl+Z** desfaz e **Ctrl+Y** refaz até 16 edições. Arquivos `.asm` têm cores para instruções, rótulos e comentários.
+
+Ao salvar, o Editor confere se o arquivo mudou no disco. Um salvamento sem edições preserva os bytes originais. Após editar, as quebras de linha são gravadas em LF. Se houver alterações pendentes ao apertar **Esc**, o Editor oferece salvar, descartar ou continuar.
 
 ### Testar a persistência
 
 Use uma cópia da imagem para conservar o arquivo original. Abra a cópia no QEMU sem `snapshot=on`.
 
 ```powershell
-if (!(Test-Path gpt-r-hd-teste.img)) {
-    Copy-Item gpt-r-hd.img gpt-r-hd-teste.img
+if (!(Test-Path gpt-r-teste.img)) {
+    Copy-Item gpt-r-build.img gpt-r-teste.img
 }
 & "C:\Program Files\qemu\qemu-system-x86_64.exe" -m 128 `
-  -drive "file=gpt-r-hd-teste.img,format=raw,if=ide,index=0" -boot c
+  -drive "file=gpt-r-teste.img,format=raw,if=ide,index=0" -boot c
 ```
 
-Crie um atalho para `CALC.APP`, arraste o ícone e feche o QEMU. Reabra a mesma cópia para conferir o atalho na posição salva. Para testar texto pelo shell, salve com `write nota.txt Pão com ovo` e confira com `cat nota.txt` depois de reabrir.
+Instale `VELHA.PKG`, troque o tema nas Configurações e feche o QEMU. Reabra a mesma cópia para conferir a preferência e executar o Jogo da Velha pela Central.
 
 ### Diagnóstico
 
@@ -171,15 +202,18 @@ Quando um programa em modo usuário sofre uma exceção, sua janela mostra o vet
 | `boot/` | Bootloader BIOS, leitura do HD, configuração VBE, coleta E820 e layout da imagem. |
 | `kernel/kernel.c` | Inicializa o kernel, mostra o log de boot e chama o shell. |
 | `kernel/apps/` | Carregador `.APP`, chamadas ao kernel, escalonador e montador. |
-| `kernel/desktop/` | Área de trabalho, janelas, Explorador, Gerenciador de tarefas, atalhos e desenho gráfico dos apps. |
+| `kernel/desktop/` | Área de trabalho, janelas, Explorador, Gerenciador de tarefas, Configurações, Lixeira e Central. |
 | `kernel/memory/` | Paginação, mapa E820, alocador de páginas físicas e heap. |
 | `kernel/interrupts/` | IDT, entradas de IRQ e diagnóstico de exceções. |
 | `kernel/drivers/` | Teclado PS/2 ABNT2, mouse PS/2, timer PIT, console gráfico VBE e disco ATA PIO. |
 | `kernel/fs/` | Leitura e escrita de arquivos e pastas FAT16. |
 | `kernel/shell/` | Prompt, histórico, comandos, editor gráfico e módulos de disco, memória e diagnóstico. |
-| `apps/` | Código-fonte dos programas de exemplo e da Calculadora. |
+| `kernel/packages/` | Validação GTRP, instalação, remoção e adaptador FAT16. |
+| `apps/` | Código-fonte dos programas de exemplo, da Calculadora e do Jogo da Velha. |
 | `tools/Pack-App.ps1` | Empacotador de executáveis `.APP` para Windows. |
+| `tools/pack-pkg.py` | Empacotador de arquivos `.PKG` GTRP v1. |
 | `docs/app-format.md` | Formato `GTRA`, chamadas de texto e vídeo, eventos de mouse, sintaxe do montador e exemplos. |
+| `docs/bloco5.md` | Formato `GTRP`, ciclo de instalação, Editor e testes do Bloco 5. |
 
 ## Licença
 

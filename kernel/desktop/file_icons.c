@@ -2,28 +2,19 @@
 
 #ifdef GPT_R_GRAPHICS
 #include "tool_view.h"
-
-static int extension(const char *name, const char *wanted)
-{
-    while (*name && *name != '.')
-        ++name;
-    for (; *name && *wanted; ++name, ++wanted) {
-        const char ch = *name >= 'a' && *name <= 'z' ? *name - ('a' - 'A') : *name;
-        if (ch != *wanted)
-            return 0;
-    }
-    return !*name && !*wanted;
-}
+#include "../fs/file_type.h"
 
 enum file_icon_kind file_icon_kind(const char *name, int folder)
 {
     if (folder)
         return FILE_ICON_FOLDER;
-    if (extension(name, ".ASM"))
+    if (file_has_extension(name, ".ASM"))
         return FILE_ICON_ASM;
-    if (extension(name, ".APP"))
+    if (file_has_extension(name, ".APP"))
         return FILE_ICON_APP;
-    if (extension(name, ".TXT"))
+    if (file_has_extension(name, ".PKG"))
+        return FILE_ICON_PKG;
+    if (file_has_extension(name, ".TXT"))
         return FILE_ICON_TEXT;
     return FILE_ICON_GENERIC;
 }
@@ -32,7 +23,7 @@ unsigned int file_icon_color(enum file_icon_kind kind)
 {
     static const unsigned int colors[] = {
         [FILE_ICON_GENERIC] = TOOL_MUTED, [FILE_ICON_FOLDER] = TOOL_GOLD,
-        [FILE_ICON_ASM] = 0xceb3ff, [FILE_ICON_APP] = TOOL_BLUE, [FILE_ICON_TEXT] = TOOL_TEXT
+        [FILE_ICON_ASM] = 0xceb3ff, [FILE_ICON_APP] = TOOL_BLUE, [FILE_ICON_TEXT] = TOOL_TEXT, [FILE_ICON_PKG] = TOOL_GREEN
     };
     return colors[kind];
 }
@@ -47,6 +38,10 @@ void file_icon_draw(enum file_icon_kind kind, unsigned int x, unsigned int y,
         PIXELS(0, 3, 9, 4, color);
         PIXELS(0, 7, 22, 14, 0xb98143);
         PIXELS(1, 9, 20, 11, color);
+    } else if (kind == FILE_ICON_PKG) {
+        PIXELS(1, 4, 20, 17, color);
+        PIXELS(1, 8, 20, 2, background);
+        PIXELS(9, 4, 4, 9, background);
     } else if (kind == FILE_ICON_APP) {
         PIXELS(0, 2, 22, 19, color);
         PIXELS(2, 6, 18, 13, background);

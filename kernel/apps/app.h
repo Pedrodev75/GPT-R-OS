@@ -21,6 +21,7 @@ struct app_info {
 /* Returns 1 for a valid app, 0 for bad format and -1 on I/O error. */
 int app_inspect(const struct fat16_volume *volume, const struct fat16_file *file,
     struct app_info *info);
+int app_validate_header(const unsigned char *header, unsigned int file_size, struct app_info *info);
 void app_make_header(unsigned char *header, unsigned int size, unsigned int entry);
 
 enum { APP_ARG_LIMIT = 40, APP_ARG_BYTES = 256 };
@@ -31,6 +32,7 @@ struct app_launch {
     int (*output)(void *, const unsigned char *, unsigned int);
     void *context;
     const struct fat16_path *directory;
+    unsigned int executable_directory;
 };
 
 void app_init(void);
@@ -50,6 +52,7 @@ struct app_task_info {
 
 struct app_task_info app_task_info(unsigned int slot);
 int app_ready(void);
+int app_directory_running(const struct fat16_volume *volume, unsigned int directory);
 void app_schedule(void);
 unsigned int app_read_capacity(unsigned int slot);
 void app_complete_read(unsigned int slot, const unsigned char *bytes, unsigned int count);

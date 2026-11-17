@@ -1,11 +1,12 @@
 #include "shell_internal.h"
 #include "../drivers/keyboard.h"
 #include "../desktop/desktop.h"
+#include "../fs/file_type.h"
 
 #ifdef GPT_R_GRAPHICS
 
 enum {
-    TEXT_LIMIT = 4096,
+    TEXT_LIMIT = 4096, HISTORY_STATES = 17,
     CELL = VGA_OVERLAY_CELL_WIDTH, ROW_HEIGHT = VGA_LINE_HEIGHT,
     EDITOR_WIDTH = DESKTOP_EDITOR_WIDTH, EDITOR_HEIGHT = DESKTOP_EDITOR_HEIGHT,
     FOOTER_Y = EDITOR_HEIGHT - 62,
@@ -31,12 +32,52 @@ struct editor {
     const char *notice;
 };
 
-static unsigned char document[TEXT_LIMIT], load_buffer[TEXT_LIMIT];
+static unsigned char document[TEXT_LIMIT], load_buffer[TEXT_LIMIT], saved_bytes[TEXT_LIMIT];
 static struct editor edit_state;
 static struct ata_disk current_disk;
 static struct fat16_volume current_volume;
 static unsigned char filename[13];
 static unsigned int filename_size, current_directory, client_x, client_y;
+static unsigned int saved_size;
+
+static struct {
+    struct editor_version {
+        unsigned char bytes[TEXT_LIMIT];
+        unsigned int length, cursor, revision;
+    } states[HISTORY_STATES];
+    unsigned int first, selected, count, next_revision, saved_revision;
+} history;
+
+static struct editor_version *version_at(unsigned int index)
+{
+    return &history.states[(history.first + index) % HISTORY_STATES];
+}
+
+static void store_version(const struct editor *edit, unsigned int revision)
+{
+    struct editor_version *snapshot = version_at(history.selected);
+    snapshot->length = edit->length;
+    snapshot->cursor = edit->cursor;
+    snapshot->revision = revision;
+    for (unsigned int i = 0; i < edit->length; ++i)
+        snapshot->bytes[i] = document[i];
+}
+
+static void change_version(struct editor *edit, int redo)
+{
+    if ((redo && history.selected + 1 == history.count) || (!redo && !history.selected))
+        return;
+    version_at(history.selected)->cursor = edit->cursor;
+    history.selected = redo ? history.selected + 1 : history.selected - 1;
+    const struct editor_version *snapshot = version_at(history.selected);
+    edit->length = snapshot->length;
+    edit->cursor = snapshot->cursor;
+    edit->changed = snapshot->revision != history.saved_revision;
+    edit->use_goal = 0;
+    edit->notice = 0;
+    for (unsigned int i = 0; i < edit->length; ++i)
+        document[i] = snapshot->bytes[i];
+}
 
 static unsigned int decode(const unsigned char *text, unsigned int available,
     unsigned int *codepoint)
@@ -84,7 +125,7 @@ static int load_chunk(void *context, const unsigned char *data, unsigned int siz
     return 1;
 }
 
-static int normalize_text(struct editor *edit)
+static int normalize_text(struct editor *edit, unsigned char *normalized)
 {
     unsigned int output = 0;
     for (unsigned int i = 0; i < edit->length;) {
@@ -93,13 +134,13 @@ static int normalize_text(struct editor *edit)
         if (!size || (cp < 32 && cp != '\r' && cp != '\n' && cp != '\t') || cp == 127)
             return 0;
         if (cp == '\r') {
-            load_buffer[output++] = '\n';
+            normalized[output++] = '\n';
             ++i;
             if (i < edit->length && load_buffer[i] == '\n')
                 ++i;
         } else {
             for (unsigned int j = 0; j < size; ++j)
-                load_buffer[output++] = load_buffer[i++];
+                normalized[output++] = load_buffer[i++];
         }
     }
     edit->length = output;
@@ -182,6 +223,12 @@ static void move_vertical(struct editor *edit, int down)
 
 static void mark_changed(struct editor *edit)
 {
+    if (history.selected + 1 == HISTORY_STATES) {
+        history.first = (history.first + 1) % HISTORY_STATES;
+        --history.selected;
+    }
+    history.count = ++history.selected + 1;
+    store_version(edit, ++history.next_revision);
     edit->changed = 1;
     edit->use_goal = 0;
     edit->notice = 0;
@@ -191,10 +238,14 @@ static void remove_text(struct editor *edit, unsigned int first, unsigned int la
 {
     if (first == last)
         return;
+    version_at(history.selected)->cursor = edit->cursor;
     for (unsigned int i = last; i < edit->length; ++i)
         document[first + i - last] = document[i];
     edit->length -= last - first;
-    edit->cursor = first;
+    if (edit->cursor >= last)
+        edit->cursor -= last - first;
+    else if (edit->cursor > first)
+        edit->cursor = first;
     mark_changed(edit);
 }
 
@@ -204,12 +255,44 @@ static void insert_text(struct editor *edit, const unsigned char *text, unsigned
         edit->notice = "Limite de 4 KiB";
         return;
     }
+    version_at(history.selected)->cursor = edit->cursor;
     for (unsigned int i = edit->length; i > edit->cursor; --i)
         document[i + size - 1] = document[i - 1];
     for (unsigned int i = 0; i < size; ++i)
         document[edit->cursor++] = text[i];
     edit->length += size;
     mark_changed(edit);
+}
+
+static int indent_byte(unsigned char ch)
+{
+    return ch == ' ' || ch == '\t';
+}
+
+static void split_line(struct editor *edit)
+{
+    unsigned char text[TEXT_LIMIT];
+    text[0] = '\n';
+    unsigned int size = 1;
+    for (unsigned int i = start_of_line(edit->cursor); i < edit->cursor && indent_byte(document[i]); ++i)
+        if (size == sizeof(text)) {
+            edit->notice = "Limite de 4 KiB";
+            return;
+        } else {
+            text[size++] = document[i];
+        }
+    insert_text(edit, text, size);
+}
+
+static void unindent(struct editor *edit)
+{
+    const unsigned int first = start_of_line(edit->cursor);
+    unsigned int end = first, columns = 0;
+    while (end < edit->length && columns < 4 && indent_byte(document[end])) {
+        columns += glyph_width(columns, document[end]);
+        ++end;
+    }
+    remove_text(edit, first, end);
 }
 
 static void apply_key(struct editor *edit, unsigned int key)
@@ -238,11 +321,16 @@ static void apply_key(struct editor *edit, unsigned int key)
     case KEY_DELETE:
         remove_text(edit, edit->cursor, after_character(edit, edit->cursor));
         break;
-    case '\n': {
-        const unsigned char newline = '\n';
-        insert_text(edit, &newline, 1);
+    case KEY_UNDO:
+    case KEY_REDO:
+        change_version(edit, key == KEY_REDO);
         break;
-    }
+    case KEY_BACKTAB:
+        unindent(edit);
+        break;
+    case '\n':
+        split_line(edit);
+        break;
     case '\t': {
         const unsigned char blanks[] = "    ";
         insert_text(edit, blanks, glyph_width(column_at(edit, edit->cursor), '\t'));
@@ -294,8 +382,8 @@ static unsigned int line_by_number(unsigned int row, unsigned int length)
 }
 
 struct editor_row {
-    unsigned char glyphs[VIEW_COLS];
-    unsigned int number, ink;
+    unsigned char glyphs[VIEW_COLS], styles[VIEW_COLS];
+    unsigned int number;
     int active, caret;
 };
 
@@ -330,15 +418,16 @@ static void paint_row(unsigned int index, const struct editor_row *next, int for
         const unsigned char glyph = next->glyphs[col];
         const int caret = (int)col == next->caret;
         if (!repaint_background && glyph == old->glyphs[col] &&
-            (!glyph || next->ink == old->ink) && caret == ((int)col == old->caret))
+            (!glyph || next->styles[col] == old->styles[col]) && caret == ((int)col == old->caret))
             continue;
 
         const unsigned int x = VIEW_X + col * CELL;
         if (!glyph || glyph == ' ') {
             fill(x, y, CELL, ROW_HEIGHT, background);
         } else {
+            static const unsigned int ink[] = {TEXT, ACCENT, 0xffcf83, 0x8eaca1};
             vga_graphics_overlay_cell(client_x + x,
-                client_y + y, glyph, next->ink, background);
+                client_y + y, glyph, ink[next->styles[col]], background);
             fill(x, y + VGA_OVERLAY_GLYPH_HEIGHT, CELL,
                 ROW_HEIGHT - VGA_OVERLAY_GLYPH_HEIGHT, background);
         }
@@ -346,6 +435,57 @@ static void paint_row(unsigned int index, const struct editor_row *next, int for
             fill(x, y + 1, 2, ROW_HEIGHT - 2, ACCENT);
     }
     *old = *next;
+}
+
+struct syntax_spans {
+    unsigned int label_start, label_end, instruction_start, instruction_end, comment;
+};
+
+static int token_byte(unsigned char ch)
+{
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+        (ch >= '0' && ch <= '9') || ch == '_' || ch == '.' || ch == '$';
+}
+
+static struct syntax_spans classify_asm(unsigned int at, unsigned int end)
+{
+    struct syntax_spans spans = { .comment = end };
+    unsigned char quote = 0;
+    for (unsigned int i = at; i < end; ++i) {
+        const unsigned char ch = document[i];
+        if (quote) {
+            if (ch == '\\' && i + 1 < end)
+                ++i;
+            else if (ch == quote)
+                quote = 0;
+        } else if (ch == ';') {
+            spans.comment = i;
+            break;
+        } else if (ch == '"' || ch == '\'') {
+            quote = ch;
+        }
+    }
+    while (at < spans.comment && indent_byte(document[at]))
+        ++at;
+    unsigned int start = at;
+    while (at < spans.comment && token_byte(document[at]))
+        ++at;
+    unsigned int colon = at;
+    while (colon < spans.comment && indent_byte(document[colon]))
+        ++colon;
+    if (at > start && colon < spans.comment && document[colon] == ':') {
+        spans.label_start = start;
+        spans.label_end = colon + 1;
+        start = colon + 1;
+        while (start < spans.comment && indent_byte(document[start]))
+            ++start;
+        at = start;
+        while (at < spans.comment && token_byte(document[at]))
+            ++at;
+    }
+    spans.instruction_start = start;
+    spans.instruction_end = at;
+    return spans;
 }
 
 static void draw_body(struct editor *edit, unsigned int active_row, unsigned int active_col,
@@ -362,17 +502,20 @@ static void draw_body(struct editor *edit, unsigned int active_row, unsigned int
                 next.caret = active_col - edit->left;
             unsigned int col = 0;
             const unsigned int end = end_of_line(edit, at);
-            unsigned int first = at;
-            while (first < end && (document[first] == ' ' || document[first] == '\t'))
-                ++first;
-            next.ink = assembly && first < end && document[first] == ';' ? MUTED : TEXT;
+            const struct syntax_spans syntax = assembly ? classify_asm(at, end) :
+                (struct syntax_spans){ .comment = end };
             while (at < end && col < edit->left + VIEW_COLS) {
                 unsigned int cp;
                 const unsigned int bytes = decode(document + at, end - at, &cp);
                 if (!bytes)
                     break;
-                if (col >= edit->left && cp != '\t')
-                    next.glyphs[col - edit->left] = shell_codepoint_glyph(cp);
+                if (col >= edit->left && cp != '\t') {
+                    const unsigned int cell = col - edit->left;
+                    next.glyphs[cell] = shell_codepoint_glyph(cp);
+                    next.styles[cell] = at >= syntax.comment ? 3 :
+                        at >= syntax.label_start && at < syntax.label_end ? 2 :
+                        at >= syntax.instruction_start && at < syntax.instruction_end ? 1 : 0;
+                }
                 col += glyph_width(col, document[at]);
                 at += bytes;
             }
@@ -412,7 +555,7 @@ static void draw_frame(void)
     label(16, STATUS_Y, "Ln", LABEL);
     label(132, STATUS_Y, "Col", LABEL);
     label(ENCODING_X, STATUS_Y, "UTF-8", MUTED);
-    label(16, SHORTCUTS_Y, "Ctrl+S Salvar    Esc Sair    Setas Mover", LABEL);
+    label(16, SHORTCUTS_Y, "Ctrl+S Salvar   Ctrl+Z/Y   Esc Sair", LABEL);
 }
 
 static void draw_status(const struct editor *edit, unsigned int line, unsigned int col)
@@ -469,10 +612,7 @@ static void draw_editor(struct editor *edit, const unsigned char *name)
 
     if (!view.initialized)
         draw_frame();
-    unsigned int name_length = 0;
-    while (name[name_length])
-        ++name_length;
-    const int assembly = name_length > 4 && shell_equals(name + name_length - 4, ".asm");
+    const int assembly = file_has_extension((const char *)name, ".ASM");
     draw_body(edit, line, col, lines, assembly);
     draw_scrollbar(edit->top, lines);
     draw_status(edit, line, col);
@@ -490,12 +630,54 @@ static void draw_editor(struct editor *edit, const unsigned char *name)
     view.initialized = 1;
 }
 
+static void remember_saved_bytes(const unsigned char *bytes, unsigned int size)
+{
+    for (unsigned int i = 0; i < size; ++i)
+        saved_bytes[i] = bytes[i];
+    saved_size = size;
+}
+
+static int compare_saved_chunk(void *context, const unsigned char *bytes, unsigned int size)
+{
+    unsigned int *offset = context;
+    for (unsigned int i = 0; i < size; ++i)
+        if (saved_bytes[(*offset)++] != bytes[i])
+            return 0;
+    return 1;
+}
+
 static int save_file(struct editor *edit, const struct fat16_volume *volume,
     const unsigned char *name, unsigned int name_size)
 {
+    struct fat16_file current;
+    const int found = fat16_find_at(volume, current_directory, name, &current);
+    if (found < 0) {
+        edit->notice = "Falha ao conferir arquivo";
+        return 0;
+    }
+    if (found != edit->exists || (found && (current.is_directory || current.size != saved_size))) {
+        edit->notice = "Arquivo mudou no disco";
+        return 0;
+    }
+    if (found) {
+        unsigned int offset = 0;
+        const enum fat16_read_result check =
+            fat16_read(volume, &current, compare_saved_chunk, &offset);
+        if (check != FAT16_READ_OK) {
+            edit->notice = check == FAT16_READ_STOPPED ? "Arquivo mudou no disco" :
+                "Falha ao conferir arquivo";
+            return 0;
+        }
+        if (!edit->changed) {
+            edit->notice = "Arquivo salvo";
+            return 1;
+        }
+    }
     const enum fat16_edit_result result =
         fat16_write_at(volume, current_directory, name, name_size, document, edit->length);
     if (result == FAT16_EDIT_OK || result == FAT16_EDIT_CLEANUP) {
+        remember_saved_bytes(document, edit->length);
+        history.saved_revision = version_at(history.selected)->revision;
         edit->changed = 0;
         edit->exists = 1;
         edit->notice = result == FAT16_EDIT_OK ? "Arquivo salvo" : "Salvo; falha na limpeza do FAT";
@@ -572,6 +754,9 @@ const char *shell_edit_file(const struct fat16_volume *volume, unsigned int dire
         ++name_size;
     if (!name_size || name_size > 12 || name[name_size])
         return "Uso: edit <arquivo>";
+    if (!file_has_extension((const char *)name, ".TXT") &&
+        !file_has_extension((const char *)name, ".ASM"))
+        return "O Editor abre .txt e .asm";
 
     if (filename_size && current_directory == directory &&
         shell_equals(name, (const char *)filename)) {
@@ -584,18 +769,20 @@ const char *shell_edit_file(const struct fat16_volume *volume, unsigned int dire
         return 0;
     }
 
+    unsigned char normalized[TEXT_LIMIT];
     struct editor edit = { .exists = file != 0 };
     if (file) {
         if (file->size > sizeof(document))
             return "Limite do editor: 4 KiB";
         if (fat16_read(volume, file, load_chunk, &edit) != FAT16_READ_OK)
             return "Falha ao ler arquivo";
-        if (!normalize_text(&edit))
+        if (!normalize_text(&edit, normalized))
             return "O editor precisa de um arquivo de texto UTF-8";
     }
 
+    remember_saved_bytes(load_buffer, file ? file->size : 0);
     for (unsigned int i = 0; i < edit.length; ++i)
-        document[i] = load_buffer[i];
+        document[i] = normalized[i];
     for (unsigned int i = 0; i <= name_size; ++i)
         filename[i] = name[i];
     filename_size = name_size;
@@ -604,6 +791,9 @@ const char *shell_edit_file(const struct fat16_volume *volume, unsigned int dire
     current_volume = *volume;
     current_volume.disk = &current_disk;
     edit_state = edit;
+    history.first = history.selected = history.next_revision = history.saved_revision = 0;
+    history.count = 1;
+    store_version(&edit_state, 0);
     desktop_open_editor(filename);
     return 0;
 }

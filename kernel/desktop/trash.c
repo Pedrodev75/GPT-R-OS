@@ -99,6 +99,16 @@ static enum fat16_edit_result reserve_receipt(const struct fat16_volume *volume,
     return FAT16_EDIT_FULL;
 }
 
+static int restorable_path(const char *path, unsigned int length)
+{
+    if (length < 2 || path[0] != '/' || path[length - 1] == '/')
+        return 0;
+    for (unsigned int i = 0; i < length; ++i)
+        if ((unsigned char)path[i] <= ' ' || (unsigned char)path[i] == 0x7f)
+            return 0;
+    return 1;
+}
+
 const char *trash_send(const struct fat16_volume *volume, const struct fat16_path *directory,
     const struct fat16_file *file)
 {
@@ -128,6 +138,13 @@ const char *trash_send(const struct fat16_volume *volume, const struct fat16_pat
             return "Caminho longo demais";
         path[length++] = name[i];
     }
+    path[length] = 0;
+    const struct fat16_path root = {0};
+    struct fat16_location original;
+    if (!restorable_path(path, length) ||
+        fat16_resolve_parent(volume, &root, (const unsigned char *)path, &original) != 1 ||
+        original.directory != from || !shell_equals(original.name, (const char *)name))
+        return "Caminho original nao restauravel";
 
     unsigned int storage;
     enum fat16_edit_result result = open_folder(volume, &storage, 1);
@@ -171,14 +188,10 @@ static int read_entry(const struct fat16_file *file, struct trash_entry *entry)
         if (record[i] != receipt_magic[i])
             return 0;
     const unsigned int length = file->size - sizeof(receipt_magic);
-    for (unsigned int i = 0; i < length; ++i) {
-        const unsigned char ch = record[sizeof(receipt_magic) + i];
-        if (ch <= ' ' || ch > '~')
-            return 0;
-        entry->path[i] = ch;
-    }
+    for (unsigned int i = 0; i < length; ++i)
+        entry->path[i] = record[sizeof(receipt_magic) + i];
     entry->path[length] = 0;
-    if (entry->path[0] != '/' || entry->path[length - 1] == '/')
+    if (!restorable_path(entry->path, length))
         return 0;
     for (unsigned int i = 0; i <= RECORD_NAME; ++i)
         entry->receipt[i] = file->name[i];

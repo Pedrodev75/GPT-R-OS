@@ -2,8 +2,20 @@
 
 enum { EMPTY_SLOT = 0, DELETED_SLOT = 0xe5 };
 
-enum { MUTATION_WINDOW = 16 };
-static unsigned int mutations, modified_dir[MUTATION_WINDOW];
+enum { MUTATION_WINDOW = 64 };
+static unsigned int mutations;
+static struct {
+    unsigned int directory;
+    unsigned char alias[11];
+} changes[MUTATION_WINDOW];
+
+static void record_change(unsigned int directory, const unsigned char *alias)
+{
+    const unsigned int index = mutations++ % MUTATION_WINDOW;
+    changes[index].directory = directory;
+    for (unsigned int i = 0; i < sizeof(changes[index].alias); ++i)
+        changes[index].alias[i] = alias[i];
+}
 
 unsigned int fat16_mutations(void)
 {
@@ -16,7 +28,7 @@ int fat16_dir_changed(unsigned int directory, unsigned int since)
     if (count > MUTATION_WINDOW)
         return 1;
     for (unsigned int i = 0; i < count; ++i)
-        if (modified_dir[(since + i) % MUTATION_WINDOW] == directory)
+        if (changes[(since + i) % MUTATION_WINDOW].directory == directory)
             return 1;
     return 0;
 }
@@ -80,6 +92,30 @@ static int encode_name(struct short_name *name, const unsigned char *text,
     }
     return (part == FAT16_LOWER_BASE || position > 8) &&
         !(name->lower & name->upper);
+}
+
+int fat16_file_changed(unsigned int directory, const unsigned char *name, unsigned int since)
+{
+    const unsigned int count = mutations - since;
+    if (count > MUTATION_WINDOW)
+        return 1;
+    unsigned int size = 0;
+    while (name[size])
+        ++size;
+    struct short_name short_name;
+    if (!encode_name(&short_name, name, size))
+        return fat16_dir_changed(directory, since);
+    for (unsigned int i = 0; i < count; ++i) {
+        const unsigned int index = (since + i) % MUTATION_WINDOW;
+        if (changes[index].directory != directory)
+            continue;
+        unsigned int byte = 0;
+        while (byte < sizeof(short_name.alias) && short_name.alias[byte] == changes[index].alias[byte])
+            ++byte;
+        if (byte == sizeof(short_name.alias))
+            return 1;
+    }
+    return 0;
 }
 
 static enum fat16_edit_result find_entry(const struct fat16_volume *vol, unsigned int directory,
@@ -158,11 +194,20 @@ static int fat_set(const struct fat16_volume *vol, unsigned int cluster,
     /* Update the primary copy last. A failed update is never reused blindly. */
     for (unsigned int copy = vol->fat_copies; copy-- > 0;) {
         const unsigned int lba = first + copy * vol->fat_sectors;
-        if (!ata_read_sector(vol->disk, lba, sector))
-            return 0;
-        put16(sector + offset, value);
-        if (!ata_write_sector(vol->disk, lba, sector))
-            return 0;
+        if (ata_read_sector(vol->disk, lba, sector)) {
+            put16(sector + offset, value);
+            if (ata_write_sector(vol->disk, lba, sector))
+                continue;
+        }
+        /* The failed write may already be visible if the cache flush failed. */
+        for (unsigned int restore = copy; restore < vol->fat_copies; ++restore) {
+            const unsigned int target = first + restore * vol->fat_sectors;
+            if (ata_read_sector(vol->disk, target, sector) && get16(sector + offset) == value) {
+                put16(sector + offset, old_value);
+                ata_write_sector(vol->disk, target, sector);
+            }
+        }
+        return 0;
     }
     return 1;
 }
@@ -266,7 +311,10 @@ static int update_directory(const struct fat16_volume *vol,
     if (!ata_read_sector(vol->disk, entry->lba, sector))
         return 0;
     unsigned char *slot = sector + (entry->index % 16) * 32;
+    unsigned char old_alias[11];
     if (!name) {
+        for (unsigned int i = 0; i < sizeof(old_alias); ++i)
+            old_alias[i] = slot[i];
         slot[0] = DELETED_SLOT;
     } else if (entry->exists) {
         slot[11] |= attr;
@@ -289,11 +337,8 @@ static int update_directory(const struct fat16_volume *vol,
         }
         write_entry(slot, name->alias, name->lower, attr, cluster, length);
     }
-    if (!ata_write_sector(vol->disk, entry->lba, sector))
-        return 0;
-    modified_dir[mutations % MUTATION_WINDOW] = entry->directory;
-    ++mutations;
-    return 1;
+    record_change(entry->directory, name ? name->alias : old_alias);
+    return ata_write_sector(vol->disk, entry->lba, sector);
 }
 
 enum fat16_edit_result fat16_mkdir(const struct fat16_volume *vol, unsigned int directory,
@@ -460,6 +505,14 @@ enum fat16_edit_result fat16_write_at(const struct fat16_volume *vol, unsigned i
     return fat16_write_stream_at(vol, directory, name, name_size, length, memory_sector, &text);
 }
 
+enum fat16_edit_result fat16_write_new_stream_at(const struct fat16_volume *vol, unsigned int directory,
+    const unsigned char *name, unsigned int name_size, unsigned int length,
+    fat16_sector_source source, void *context)
+{
+    return write_source(vol, directory, name, name_size, length, source, context,
+        WRITE_EXCLUSIVE | WRITE_ORIGINAL_NAME);
+}
+
 enum fat16_edit_result fat16_create(const struct fat16_volume *vol, unsigned int directory,
     const unsigned char *name, unsigned int name_size)
 {
@@ -542,13 +595,13 @@ static enum fat16_edit_result rename_entry(const struct fat16_volume *vol,
     if (!ata_read_sector(vol->disk, entry->lba, sector))
         return FAT16_EDIT_IO;
     unsigned char *slot = sector + (entry->index % 16) * 32;
+    record_change(entry->directory, slot);
     for (unsigned int i = 0; i < sizeof(name->alias); ++i)
         slot[i] = name->alias[i];
     slot[12] = (slot[12] & ~(FAT16_LOWER_BASE | FAT16_LOWER_EXTENSION)) | name->lower;
+    record_change(entry->directory, name->alias);
     if (!ata_write_sector(vol->disk, entry->lba, sector))
         return FAT16_EDIT_IO;
-    modified_dir[mutations % MUTATION_WINDOW] = entry->directory;
-    ++mutations;
     return FAT16_EDIT_OK;
 }
 

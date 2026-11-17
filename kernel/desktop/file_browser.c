@@ -21,7 +21,7 @@ enum menu_type { MENU_NONE, MENU_FILE, MENU_FOLDER, MENU_NEW };
 
 static struct {
     struct fat16_location entry;
-    unsigned int first_cluster, size;
+    unsigned int first_cluster, size, seen;
     int available, move;
 } clipboard;
 
@@ -141,7 +141,7 @@ static const char *open_file(const struct fat16_file *file, const struct fat16_p
             ++length;
         struct app_launch launch = {
             .args = (const unsigned char *)file->name, .args_size = length + 1, .argc = 1,
-            .directory = directory
+            .directory = directory, .executable_directory = fat16_path_cluster(directory)
         };
         const enum app_status status = desktop_open_app(&browser.volume, file, &launch);
         if (status == APP_STARTED)
@@ -149,10 +149,14 @@ static const char *open_file(const struct fat16_file *file, const struct fat16_p
         return status == APP_LIMIT ? "Feche uma janela de APP" :
             status == APP_INVALID ? "Formato APP invalido" : "Falha ao abrir o APP";
     }
+    if (kind == FILE_ICON_PKG) {
+        desktop_open_package(fat16_path_cluster(directory), file);
+        return 0;
+    }
     if (kind == FILE_ICON_TEXT || kind == FILE_ICON_ASM)
         return shell_edit_file(&browser.volume, fat16_path_cluster(directory),
             (const unsigned char *)file->name, file);
-    return "Abra arquivos TXT, ASM ou APP";
+    return "Abra arquivos TXT, ASM, APP ou PKG";
 }
 
 static void open_selected(void)
@@ -282,6 +286,7 @@ static int take_file(int move)
         clipboard.entry.name[i] = file->name[i];
     clipboard.first_cluster = file->first_cluster;
     clipboard.size = file->size;
+    clipboard.seen = fat16_mutations();
     clipboard.available = 1;
     clipboard.move = move;
     browser.notice = move ? "Recortado. Escolha onde colar" : "Copiado. Escolha onde colar";
@@ -299,7 +304,8 @@ static int paste_file(void)
         browser.notice = "Falha ao ler a origem";
         return 1;
     }
-    if (!found || file.first_cluster != clipboard.first_cluster || file.size != clipboard.size) {
+    if (!found || fat16_file_changed(from->directory, from->name, clipboard.seen) ||
+        file.first_cluster != clipboard.first_cluster || file.size != clipboard.size) {
         clipboard.available = 0;
         browser.notice = "Origem mudou. Selecione de novo";
         return 1;
@@ -524,7 +530,7 @@ static void draw_row(unsigned int x, unsigned int y, unsigned int index)
     file_icon_draw(kind, x + 13, y + 7, 1, background);
     static const char *const types[] = {
         [FILE_ICON_GENERIC] = "Arquivo", [FILE_ICON_FOLDER] = "Pasta",
-        [FILE_ICON_ASM] = "Fonte ASM", [FILE_ICON_APP] = "Programa", [FILE_ICON_TEXT] = "Texto"
+        [FILE_ICON_ASM] = "Fonte ASM", [FILE_ICON_APP] = "Programa", [FILE_ICON_TEXT] = "Texto", [FILE_ICON_PKG] = "Pacote"
     };
     tool_label(x + 54, y + 7, file->name, TOOL_TEXT);
     tool_label(x + 320, y + 7, types[kind], accent);

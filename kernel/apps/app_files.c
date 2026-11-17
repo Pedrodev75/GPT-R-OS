@@ -7,7 +7,7 @@ enum { BUFFER_PAGES = APP_FILE_LIMIT / PAGE_SIZE, HANDLE_BASE = 3 };
 struct handle {
     struct fat16_location entry;
     struct fat16_file original;
-    unsigned int offset;
+    unsigned int offset, seen;
     unsigned char *pages[BUFFER_PAGES];
     int used, output, existed;
 };
@@ -122,6 +122,7 @@ int app_file_open(unsigned int slot, const unsigned char *path, unsigned int mod
 
     next.used = 1;
     next.existed = found;
+    next.seen = fat16_mutations();
     table->handles[index] = next;
     return HANDLE_BASE + index;
 }
@@ -134,8 +135,10 @@ static struct handle *find_handle(struct file_table *table, unsigned int number)
     return handle->used ? handle : 0;
 }
 
-static int still_current(const struct file_table *table, const struct handle *handle)
+static int still_current(const struct file_table *table, struct handle *handle)
 {
+    if (fat16_file_changed(handle->entry.directory, handle->entry.name, handle->seen))
+        return APP_ERR_CHANGED;
     struct fat16_file latest;
     const int found = fat16_find_at(&table->volume, handle->entry.directory,
         handle->entry.name, &latest);
@@ -145,6 +148,7 @@ static int still_current(const struct file_table *table, const struct handle *ha
         (latest.is_directory || latest.first_cluster != handle->original.first_cluster ||
          latest.size != handle->original.size || latest.modified_date != handle->original.modified_date)))
         return APP_ERR_CHANGED;
+    handle->seen = fat16_mutations();
     return 0;
 }
 

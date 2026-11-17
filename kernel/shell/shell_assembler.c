@@ -1,6 +1,7 @@
 #include "shell_internal.h"
 #include "../apps/app.h"
 #include "../apps/assembler.h"
+#include "../fs/file_type.h"
 
 enum { SOURCE_LIMIT = 4096 };
 static unsigned char source[SOURCE_LIMIT];
@@ -25,7 +26,9 @@ void shell_assemble(unsigned int *row, const unsigned char *argument)
     unsigned char input_name[FAT16_PATH_CAPACITY], output_name[FAT16_PATH_CAPACITY];
     const int input_length = shell_word(&argument, input_name, sizeof(input_name));
     const int output_length = shell_word(&argument, output_name, sizeof(output_name));
-    if (!input_length || !output_length || *argument) {
+    if (!input_length || !output_length || *argument ||
+        !file_has_extension((const char *)input_name, ".ASM") ||
+        !file_has_extension((const char *)output_name, ".APP")) {
         shell_print_line(row, "Uso: asm <fonte.asm> <saida.APP>");
         return;
     }
@@ -81,7 +84,8 @@ void shell_assemble(unsigned int *row, const unsigned char *argument)
 void shell_appinfo(unsigned int *row, const unsigned char *argument)
 {
     unsigned char name[FAT16_PATH_CAPACITY];
-    if (!shell_word(&argument, name, sizeof(name)) || *argument) {
+    if (!shell_word(&argument, name, sizeof(name)) || *argument ||
+        !file_has_extension((const char *)name, ".APP")) {
         shell_print_error(row, "Uso: appinfo <arquivo.APP>");
         return;
     }

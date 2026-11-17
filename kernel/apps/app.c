@@ -52,6 +52,7 @@ struct process {
     enum process_state state;
     unsigned int pid;
     unsigned int started_at, stopped_at, cpu_ticks;
+    unsigned int executable_directory, executable_volume;
     unsigned char *image, *stack;
     unsigned char *heap_pages[APP_HEAP_PAGES];
     unsigned char heap_runs[APP_HEAP_PAGES];
@@ -134,28 +135,6 @@ static int collect_image(void *context, const unsigned char *data, unsigned int 
     return 1;
 }
 
-static unsigned int read_u32(const unsigned char *p)
-{
-    return p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned int)p[3] << 24);
-}
-
-static int valid_image(const struct image_reader *reader, unsigned int file_size,
-                       unsigned int *entry)
-{
-    const unsigned char *h = reader->header;
-    if (reader->size != file_size || read_u32(h) != 0x41525447u ||
-        read_u32(h + 4) != ((APP_HEADER_SIZE << 16) | APP_FORMAT_VERSION) ||
-        read_u32(h + 8) != file_size - APP_HEADER_SIZE)
-        return 0;
-    *entry = read_u32(h + 12);
-    if (*entry >= file_size - APP_HEADER_SIZE)
-        return 0;
-    for (unsigned int i = 16; i < APP_HEADER_SIZE; ++i)
-        if (h[i])
-            return 0;
-    return 1;
-}
-
 static int read_image(const struct fat16_volume *volume, const struct fat16_file *file,
     unsigned char *image, struct app_info *info)
 {
@@ -164,9 +143,8 @@ static int read_image(const struct fat16_volume *volume, const struct fat16_file
     struct image_reader reader = { .image = image };
     if (fat16_read(volume, file, collect_image, &reader) != FAT16_READ_OK)
         return -1;
-    if (!valid_image(&reader, file->size, &info->entry))
+    if (reader.size != file->size || !app_validate_header(reader.header, file->size, info))
         return 0;
-    info->image_size = file->size - APP_HEADER_SIZE;
     return 1;
 }
 
@@ -342,6 +320,8 @@ enum app_status app_start(unsigned int slot, const struct fat16_volume *volume,
                         .flags = 0x202, .rsp = rsp, .ss = 0x1b },
                     .state = READY, .pid = allocate_pid(), .image = image, .stack = stack, .image_size = info.image_size,
                     .started_at = timer_ticks(),
+                    .executable_directory = launch->executable_directory,
+                    .executable_volume = volume->fat_start,
                     .headless = slot >= APP_PROCESS_LIMIT,
                     .output = launch->output, .context = launch->context
                 };
@@ -368,6 +348,17 @@ int app_ready(void)
     for (unsigned int i = 0; i < APP_PROCESS_SLOTS; ++i)
         if (processes[i].state == READY)
             return 1;
+    return 0;
+}
+
+int app_directory_running(const struct fat16_volume *volume, unsigned int directory)
+{
+    for (unsigned int i = 0; i < APP_PROCESS_SLOTS; ++i) {
+        const struct process *process = &processes[i];
+        if (process->state != UNUSED && process->state != FINISHED &&
+            process->executable_volume == volume->fat_start && process->executable_directory == directory)
+            return 1;
+    }
     return 0;
 }
 

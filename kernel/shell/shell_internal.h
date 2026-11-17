@@ -80,6 +80,7 @@ const char *shell_file_error(enum fat16_edit_result result);
 void shell_report_file_edit(unsigned int *row, enum fat16_edit_result result,
     const char *success);
 void shell_edit(unsigned int *row, const unsigned char *argument);
+void shell_open_package(unsigned int *row, const unsigned char *argument);
 const char *shell_edit_file(const struct fat16_volume *volume, unsigned int directory,
     const unsigned char *name, const struct fat16_file *file);
 void shell_editor_moved(unsigned int from, const unsigned char *old_name,

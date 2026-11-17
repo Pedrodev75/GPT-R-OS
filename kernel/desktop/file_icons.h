@@ -3,7 +3,7 @@
 
 #ifdef GPT_R_GRAPHICS
 
-enum file_icon_kind { FILE_ICON_GENERIC, FILE_ICON_FOLDER, FILE_ICON_ASM, FILE_ICON_APP, FILE_ICON_TEXT };
+enum file_icon_kind { FILE_ICON_GENERIC, FILE_ICON_FOLDER, FILE_ICON_ASM, FILE_ICON_APP, FILE_ICON_TEXT, FILE_ICON_PKG };
 
 enum file_icon_kind file_icon_kind(const char *name, int folder);
 unsigned int file_icon_color(enum file_icon_kind kind);

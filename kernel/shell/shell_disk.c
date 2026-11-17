@@ -1,4 +1,5 @@
 #include "../desktop/desktop.h"
+#include "../fs/file_type.h"
 #include "../apps/app.h"
 #include "../drivers/keyboard.h"
 #include "shell_internal.h"
@@ -395,7 +396,18 @@ static int prepare_app(unsigned int *row, const unsigned char *argument, unsigne
         shell_print_error(row, "Uso: run <arquivo.APP> [argumentos]");
         return 0;
     }
-    return shell_find_file(row, volume, args, file);
+    if (!file_has_extension((const char *)args, ".APP")) {
+        shell_print_error(row, "run espera um arquivo .APP");
+        return 0;
+    }
+    struct fat16_location where;
+    const int found = fat16_resolve_file(volume, shell_directory(), args, &where, file);
+    if (found == 1) {
+        launch->executable_directory = where.directory;
+        return 1;
+    }
+    shell_print_error(row, found < 0 ? "Falha ao ler diretorio" : "Arquivo nao encontrado");
+    return 0;
 }
 
 static void report_app_result(unsigned int *row, struct app_result result)
@@ -661,6 +673,30 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
     shell_run_apps(row, &argument, 1, 0);
 #endif
 }
+
+#ifdef GPT_R_GRAPHICS
+void shell_open_package(unsigned int *row, const unsigned char *argument)
+{
+    unsigned char path[FAT16_PATH_CAPACITY];
+    if (!shell_word(&argument, path, sizeof(path)) || *argument ||
+        !file_has_extension((const char *)path, ".PKG")) {
+        shell_print_error(row, "Uso: pkg <arquivo.PKG>");
+        return;
+    }
+    struct ata_disk disk;
+    struct fat16_volume volume;
+    if (!shell_open_volume(row, &disk, &volume))
+        return;
+    struct fat16_location where;
+    struct fat16_file file;
+    const int found = fat16_resolve_file(&volume, shell_directory(), path, &where, &file);
+    if (found != 1) {
+        shell_print_error(row, found < 0 ? "Falha ao ler diretorio" : "Pacote nao encontrado");
+        return;
+    }
+    desktop_open_package(where.directory, &file);
+}
+#endif
 
 const char *shell_file_error(enum fat16_edit_result result)
 {

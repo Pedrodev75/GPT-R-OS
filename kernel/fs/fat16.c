@@ -260,8 +260,8 @@ enum fat16_read_result fat16_read(const struct fat16_volume* volume, const struc
     return FAT16_READ_OK;
 }
 
-int fat16_read_range(const struct fat16_volume *vol, const struct fat16_file *file,
-    unsigned int offset, unsigned char *data, unsigned int size)
+int fat16_read_range_cursor(const struct fat16_volume *vol, const struct fat16_file *file,
+    struct fat16_read_cursor *cursor, unsigned int offset, unsigned char *data, unsigned int size)
 {
     if (offset > file->size || size > file->size - offset ||
         (unsigned long long)file->size > (unsigned long long)vol->clusters *
@@ -271,11 +271,17 @@ int fat16_read_range(const struct fat16_volume *vol, const struct fat16_file *fi
         return 1;
     const int reaches_end = size == file->size - offset;
     const unsigned int cluster_bytes = vol->sectors_per_cluster * ATA_SECTOR_SIZE;
-    unsigned int cluster = file->first_cluster;
+    unsigned int cluster = file->first_cluster, index = 0;
+    if (cursor->cluster && offset / cluster_bytes >= cursor->index) {
+        cluster = cursor->cluster;
+        index = cursor->index;
+        offset -= index * cluster_bytes;
+    }
     while (offset >= cluster_bytes) {
         if (!fat16_cluster_valid(vol, cluster) || !fat16_get_link(vol, cluster, &cluster))
             return 0;
         offset -= cluster_bytes;
+        ++index;
     }
     unsigned char sector[ATA_SECTOR_SIZE];
     while (size) {
@@ -296,11 +302,21 @@ int fat16_read_range(const struct fat16_volume *vol, const struct fat16_file *fi
             if (!fat16_get_link(vol, cluster, &cluster))
                 return 0;
             offset = 0;
+            ++index;
         }
     }
     if (reaches_end) {
         unsigned int next;
-        return fat16_get_link(vol, cluster, &next) && next >= 0xfff8;
+        if (!fat16_get_link(vol, cluster, &next) || next < 0xfff8)
+            return 0;
     }
+    *cursor = (struct fat16_read_cursor){ cluster, index };
     return 1;
+}
+
+int fat16_read_range(const struct fat16_volume *vol, const struct fat16_file *file,
+    unsigned int offset, unsigned char *data, unsigned int size)
+{
+    struct fat16_read_cursor cursor = {0};
+    return fat16_read_range_cursor(vol, file, &cursor, offset, data, size);
 }

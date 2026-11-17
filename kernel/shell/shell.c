@@ -112,7 +112,7 @@ static void command_clear(unsigned int *row, const unsigned char *argument)
 static void command_version(unsigned int *row, const unsigned char *argument)
 {
     (void)argument;
-    shell_print_line(row, "GPT-R OS v0.6.5");
+    shell_print_line(row, "GPT-R OS v0.7.0");
 }
 
 static void command_uptime(unsigned int *row, const unsigned char *argument)
@@ -181,6 +181,7 @@ static const struct command {
     {"appinfo", "Mostra o cabecalho de um .APP", shell_appinfo, "<arquivo.APP>", COMMAND_OUTPUT},
 #ifdef GPT_R_GRAPHICS
     {"edit", "Abre o editor grafico de texto", shell_edit, "<arquivo>", 0},
+    {"pkg", "Abre um pacote na Central de Aplicativos", shell_open_package, "<arquivo.PKG>", 0},
 #endif
     {"write", "Cria ou sobrescreve um arquivo", shell_write, "<arquivo> <texto>", 0},
     {"rm", "Remove um arquivo", shell_rm, "<arquivo>", 0},
@@ -370,7 +371,7 @@ static void run_pipeline(unsigned int *row, const struct shell_stage *stages,
     struct fat16_location target;
     struct fat16_file original;
     int existed = 0;
-    unsigned int name_size = 0;
+    unsigned int name_size = 0, target_seen = 0;
     if (redirect) {
         unsigned char path[FAT16_PATH_CAPACITY];
         if (!shell_word(&redirect, path, sizeof(path)) || *redirect) {
@@ -398,6 +399,7 @@ static void run_pipeline(unsigned int *row, const struct shell_stage *stages,
             shell_print_error(row, "Falha ao ler o destino");
             return;
         }
+        target_seen = fat16_mutations();
     }
 
     struct shell_buffer buffers[2] = {0};
@@ -440,7 +442,8 @@ static void run_pipeline(unsigned int *row, const struct shell_stage *stages,
         const int found = fat16_lookup_at(&volume, target.directory, target.name, &current);
         if (found < 0) {
             shell_print_error(row, "Falha ao ler o destino");
-        } else if (found != existed || (found &&
+        } else if (fat16_file_changed(target.directory, target.name, target_seen) ||
+            found != existed || (found &&
             (original.first_cluster != current.first_cluster || original.size != current.size ||
              original.modified_date != current.modified_date))) {
             shell_print_error(row, "O destino mudou durante o comando");
