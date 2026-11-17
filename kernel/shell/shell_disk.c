@@ -406,18 +406,60 @@ const char *shell_check_run_args(const unsigned char *argument)
     return pack_arguments(argument, args, &launch);
 }
 
-static int prepare_app(unsigned int *row, const unsigned char *argument, unsigned char *args,
+static int replace_app_name(unsigned char *args, unsigned int *size, const unsigned char *path)
+{
+    unsigned int old = 1, next = 1;
+    while (args[old - 1])
+        ++old;
+    while (path[next - 1])
+        ++next;
+    const unsigned int remaining = *size - old;
+    if (next > APP_ARG_BYTES - remaining)
+        return 0;
+    /* SYS64 paths are longer than the command basename. */
+    for (unsigned int i = remaining; i; --i)
+        args[next + i - 1] = args[old + i - 1];
+    for (unsigned int i = 0; i < next; ++i)
+        args[i] = path[i];
+    *size = next + remaining;
+    return 1;
+}
+
+static int plain_app_command(const unsigned char *text, const unsigned char *name)
+{
+    text = shell_skip_spaces(text);
+    while (*name && *name == *text) {
+        ++name;
+        ++text;
+    }
+    return !*name && (!*text || *text == ' ');
+}
+
+static int prepare_app(unsigned int *row, const struct shell_app_command *command, unsigned char *args,
     struct app_launch *launch, const struct fat16_volume *volume, struct fat16_file *file)
 {
     *launch = (struct app_launch){ .args = args, .directory = shell_directory() };
-    const char *error = pack_arguments(argument, args, launch);
+    const char *error = pack_arguments(command->argument, args, launch);
     if (error) {
         shell_print_error(row, error);
         return 0;
     }
     if (!file_has_extension((const char *)args, ".APP")) {
-        shell_print_error(row, "run espera um arquivo .APP");
-        return 0;
+        if (!command->search_sys64) {
+            shell_print_error(row, "run espera um arquivo .APP");
+            return 0;
+        }
+        if (!plain_app_command(command->argument, args)) {
+            shell_print_error(row, "Use o nome do comando sem aspas ou informe o caminho APP");
+            return 0;
+        }
+        unsigned char path[SYS64_APP_PATH];
+        const char *lookup = shell_sys64_app(volume, args, file, &launch->executable_directory, path);
+        if (lookup || !replace_app_name(args, &launch->args_size, path)) {
+            shell_print_error(row, lookup ? lookup : "Argumentos demais para SYS64");
+            return 0;
+        }
+        return 1;
     }
     struct fat16_location where;
     const int found = fat16_resolve_file(volume, shell_directory(), args, &where, file);
@@ -645,7 +687,7 @@ static struct app_result run_apps(unsigned int *row, unsigned int count, unsigne
     return result;
 }
 
-void shell_run_apps(unsigned int *row, const unsigned char *const *arguments,
+void shell_run_apps(unsigned int *row, const struct shell_app_command *commands,
     unsigned int count, struct shell_stream *stream)
 {
     struct ata_disk disk;
@@ -660,7 +702,7 @@ void shell_run_apps(unsigned int *row, const unsigned char *const *arguments,
         unsigned char args[APP_ARG_BYTES];
         struct app_launch launch;
         struct fat16_file file;
-        if (!prepare_app(row, arguments[i], args, &launch, &volume, &file))
+        if (!prepare_app(row, &commands[i], args, &launch, &volume, &file))
             break;
         result.status = app_start(APP_PROCESS_LIMIT + i, &volume, &file, &launch);
         if (result.status != APP_STARTED)
@@ -681,8 +723,9 @@ void shell_run_apps(unsigned int *row, const unsigned char *const *arguments,
     report_app_result(row, result);
 }
 
-void shell_run_app(unsigned int *row, const unsigned char *argument)
+static void launch_app(unsigned int *row, const unsigned char *argument, int search_sys64)
 {
+    const struct shell_app_command command = { argument, search_sys64 };
 #ifdef GPT_R_GRAPHICS
     struct ata_disk disk;
     struct fat16_volume volume;
@@ -690,13 +733,23 @@ void shell_run_app(unsigned int *row, const unsigned char *argument)
     unsigned char args[APP_ARG_BYTES];
     struct app_launch launch;
     if (shell_open_volume(row, &disk, &volume) &&
-        prepare_app(row, argument, args, &launch, &volume, &file)) {
+        prepare_app(row, &command, args, &launch, &volume, &file)) {
         const enum app_status status = desktop_open_app(&volume, &file, &launch);
         report_app_result(row, (struct app_result){ .status = status });
     }
 #else
-    shell_run_apps(row, &argument, 1, 0);
+    shell_run_apps(row, &command, 1, 0);
 #endif
+}
+
+void shell_run_app(unsigned int *row, const unsigned char *argument)
+{
+    launch_app(row, argument, 0);
+}
+
+void shell_run_native(unsigned int *row, const unsigned char *argument)
+{
+    launch_app(row, argument, 1);
 }
 
 #ifdef GPT_R_GRAPHICS

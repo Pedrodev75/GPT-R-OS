@@ -126,6 +126,13 @@ const char *trash_send(const struct fat16_volume *volume, const struct fat16_pat
         current.modified_date != file->modified_date)
         return "Origem mudou. Selecione de novo";
 
+    unsigned int name_size = 0;
+    while (name[name_size])
+        ++name_size;
+    const enum fat16_edit_result access = fat16_check_mutation(volume, from, name, name_size);
+    if (access != FAT16_EDIT_OK)
+        return shell_file_error(access);
+
     char path[FAT16_PATH_CAPACITY];
     fat16_format_path(directory, path);
     unsigned int length = 0;

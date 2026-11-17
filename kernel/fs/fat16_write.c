@@ -1,4 +1,5 @@
 #include "fat16_internal.h"
+#include "fat16_path.h"
 
 enum { EMPTY_SLOT = 0, DELETED_SLOT = 0xe5 };
 
@@ -63,6 +64,64 @@ struct short_name {
     unsigned int lower, upper;
 };
 
+static int equal_bytes(const unsigned char *a, const unsigned char *b, unsigned int size)
+{
+    for (unsigned int i = 0; i < size; ++i)
+        if (a[i] != b[i])
+            return 0;
+    return 1;
+}
+
+enum fat16_edit_result fat16_sys64_directory(const struct fat16_volume *vol, struct fat16_file *folder)
+{
+    static const unsigned char upper[] = "SYS64", lower[] = "sys64";
+    struct fat16_dir root = {0};
+    int found;
+    while ((found = fat16_next_at(vol, &root, folder)) == 1) {
+        const unsigned char *name = (const unsigned char *)folder->name;
+        if (!equal_bytes(name, upper, sizeof(upper)) && !equal_bytes(name, lower, sizeof(lower)))
+            continue;
+        if (!folder->is_directory)
+            return FAT16_EDIT_EXISTS;
+        return fat16_cluster_valid(vol, folder->first_cluster) ? FAT16_EDIT_OK : FAT16_EDIT_IO;
+    }
+    return found < 0 ? FAT16_EDIT_IO : FAT16_EDIT_MISSING;
+}
+
+static int read_parent(const struct fat16_volume *vol, unsigned int directory, unsigned int *parent)
+{
+    static const unsigned char dot[] = ".          ", dotdot[] = "..         ";
+    unsigned char sector[512];
+    if (!fat16_cluster_valid(vol, directory) ||
+        !ata_read_sector(vol->disk, fat16_cluster_lba(vol, directory), sector) ||
+        !equal_bytes(sector, dot, 11) || (sector[11] & 0x18) != 0x10 || get16(sector + 26) != directory ||
+        !equal_bytes(sector + 32, dotdot, 11) || (sector[43] & 0x18) != 0x10)
+        return 0;
+    *parent = get16(sector + 58);
+    return *parent == 0 || fat16_cluster_valid(vol, *parent);
+}
+
+static enum fat16_edit_result mutation_allowed(const struct fat16_volume *vol, unsigned int dir,
+    const struct short_name *name)
+{
+    const unsigned char reserved[] = "SYS64      ";
+    if (!dir)
+        return equal_bytes(name->alias, reserved, 11) ? FAT16_EDIT_PROTECTED : FAT16_EDIT_OK;
+    struct fat16_file system;
+    const enum fat16_edit_result status = fat16_sys64_directory(vol, &system);
+    if (status == FAT16_EDIT_MISSING || status == FAT16_EDIT_EXISTS)
+        return FAT16_EDIT_OK;
+    if (status != FAT16_EDIT_OK)
+        return status;
+    for (unsigned int depth = 0; dir && depth < FAT16_PATH_DEPTH; ++depth) {
+        if (dir == system.first_cluster)
+            return FAT16_EDIT_PROTECTED;
+        if (!read_parent(vol, dir, &dir))
+            return FAT16_EDIT_IO;
+    }
+    return dir ? FAT16_EDIT_IO : FAT16_EDIT_OK;
+}
+
 static int encode_name(struct short_name *name, const unsigned char *text,
     unsigned int length)
 {
@@ -93,6 +152,13 @@ static int encode_name(struct short_name *name, const unsigned char *text,
     }
     return (part == FAT16_LOWER_BASE || position > 8) &&
         !(name->lower & name->upper);
+}
+
+enum fat16_edit_result fat16_check_mutation(const struct fat16_volume *vol, unsigned int directory,
+    const unsigned char *text_name, unsigned int size)
+{
+    struct short_name name;
+    return encode_name(&name, text_name, size) ? mutation_allowed(vol, directory, &name) : FAT16_EDIT_NAME;
 }
 
 int fat16_file_changed(unsigned int directory, const unsigned char *name, unsigned int since)
@@ -369,14 +435,23 @@ static int update_directory(const struct fat16_volume *vol,
     return 0;
 }
 
-enum fat16_edit_result fat16_mkdir(const struct fat16_volume *vol, unsigned int directory,
-    const unsigned char *text_name, unsigned int name_size)
+static void discard_extension(const struct fat16_volume *vol, const struct edit_entry *entry)
+{
+    if (entry->extension && fat_set(vol, entry->tail, entry->extension, entry->previous_end))
+        fat_set(vol, entry->extension, FAT16_END, 0);
+}
+
+static enum fat16_edit_result make_directory(const struct fat16_volume *vol, unsigned int directory,
+    const unsigned char *text_name, unsigned int name_size, int create_sys64)
 {
     struct short_name name;
     if (!encode_name(&name, text_name, name_size) || name.alias[8] != ' ')
         return FAT16_EDIT_NAME;
     struct edit_entry entry;
-    enum fat16_edit_result result = find_entry(vol, directory, &name, &entry, 1);
+    enum fat16_edit_result result = create_sys64 ? FAT16_EDIT_OK : mutation_allowed(vol, directory, &name);
+    if (result != FAT16_EDIT_OK)
+        return result;
+    result = find_entry(vol, directory, &name, &entry, 1);
     if (result != FAT16_EDIT_OK)
         return result;
     result = prepare_slot(vol, &entry);
@@ -384,17 +459,52 @@ enum fat16_edit_result fat16_mkdir(const struct fat16_volume *vol, unsigned int 
         return result;
 
     unsigned int cluster;
-    if (!find_free_from(vol, 2, &cluster))
+    if (!find_free_from(vol, 2, &cluster)) {
+        discard_extension(vol, &entry);
         return FAT16_EDIT_IO;
-    if (!cluster)
+    }
+    if (!cluster) {
+        discard_extension(vol, &entry);
         return FAT16_EDIT_FULL;
+    }
     unsigned char first_sector[512] = {0};
     write_entry(first_sector, (const unsigned char *)".          ", 0, 0x10, cluster, 0);
     write_entry(first_sector + 32, (const unsigned char *)"..         ", 0, 0x10, directory, 0);
-    if (!init_cluster(vol, cluster, first_sector) ||
-        !update_directory(vol, &entry, &name, cluster, 0, 0x10, 0))
+    if (!init_cluster(vol, cluster, first_sector)) {
+        discard_extension(vol, &entry);
         return FAT16_EDIT_IO;
+    }
+    int unchanged = 1;
+    if (!update_directory(vol, &entry, &name, cluster, 0, 0x10, &unchanged)) {
+        if (!unchanged)
+            return FAT16_EDIT_UNCERTAIN;
+        release_chain(vol, cluster);
+        discard_extension(vol, &entry);
+        return FAT16_EDIT_IO;
+    }
     return FAT16_EDIT_OK;
+}
+
+enum fat16_edit_result fat16_mkdir(const struct fat16_volume *vol, unsigned int directory,
+    const unsigned char *name, unsigned int size)
+{
+    return make_directory(vol, directory, name, size, 0);
+}
+
+enum fat16_edit_result fat16_sys64_ensure(const struct fat16_volume *vol, struct fat16_file *folder)
+{
+    static const unsigned char name[] = "SYS64";
+    enum fat16_edit_result status = fat16_sys64_directory(vol, folder);
+    if (status == FAT16_EDIT_MISSING) {
+        status = make_directory(vol, FAT16_ROOT, name, sizeof(name) - 1, 1);
+        if (status == FAT16_EDIT_OK)
+            status = fat16_sys64_directory(vol, folder);
+    }
+    unsigned int parent;
+    if (status == FAT16_EDIT_OK &&
+        (!read_parent(vol, folder->first_cluster, &parent) || parent))
+        return FAT16_EDIT_IO;
+    return status;
 }
 
 static int uppercase_txt(const struct short_name *name)
@@ -410,7 +520,10 @@ enum fat16_edit_result fat16_check_write(const struct fat16_volume *vol, unsigne
     if (!encode_name(&name, text_name, name_size))
         return FAT16_EDIT_NAME;
     struct edit_entry entry;
-    const enum fat16_edit_result result = find_entry(vol, directory, &name, &entry, 0);
+    enum fat16_edit_result result = mutation_allowed(vol, directory, &name);
+    if (result != FAT16_EDIT_OK)
+        return result;
+    result = find_entry(vol, directory, &name, &entry, 0);
     if (result != FAT16_EDIT_OK)
         return result;
     if (!entry.exists && uppercase_txt(&name))
@@ -420,7 +533,7 @@ enum fat16_edit_result fat16_check_write(const struct fat16_volume *vol, unsigne
     return entry.lba || entry.tail ? FAT16_EDIT_OK : FAT16_EDIT_FULL;
 }
 
-enum { WRITE_EXCLUSIVE = 1, WRITE_ORIGINAL_NAME = 2 };
+enum { WRITE_EXCLUSIVE = 1, WRITE_ORIGINAL_NAME = 2, WRITE_SYS64 = 4 };
 
 static enum fat16_edit_result write_source(const struct fat16_volume *vol, unsigned int directory,
     const unsigned char *text_name, unsigned int name_size, unsigned int length,
@@ -429,6 +542,9 @@ static enum fat16_edit_result write_source(const struct fat16_volume *vol, unsig
     struct short_name name;
     if (!encode_name(&name, text_name, name_size))
         return FAT16_EDIT_NAME;
+    const enum fat16_edit_result access = flags & WRITE_SYS64 ? FAT16_EDIT_OK : mutation_allowed(vol, directory, &name);
+    if (access != FAT16_EDIT_OK)
+        return access;
     const unsigned int cluster_size = vol->sectors_per_cluster * 512;
     if (length > (unsigned long long)vol->clusters * cluster_size)
         return FAT16_EDIT_SIZE;
@@ -509,8 +625,7 @@ static enum fat16_edit_result write_source(const struct fat16_volume *vol, unsig
         if (!unchanged)
             return FAT16_EDIT_UNCERTAIN;
         release_chain(vol, cluster);
-        if (entry.extension && fat_set(vol, entry.tail, entry.extension, entry.previous_end))
-            fat_set(vol, entry.extension, FAT16_END, 0);
+        discard_extension(vol, &entry);
         return FAT16_EDIT_IO;
     }
     if (entry.exists && !release_chain(vol, entry.first_cluster))
@@ -566,6 +681,9 @@ enum fat16_edit_result fat16_remove_at(const struct fat16_volume *vol, unsigned 
     struct short_name name;
     if (!encode_name(&name, text_name, name_size))
         return FAT16_EDIT_NAME;
+    const enum fat16_edit_result access = mutation_allowed(vol, directory, &name);
+    if (access != FAT16_EDIT_OK)
+        return access;
     struct edit_entry entry;
     enum fat16_edit_result result = find_entry(vol, directory, &name, &entry, 0);
     if (result == FAT16_EDIT_CASE)
@@ -605,6 +723,22 @@ static int disk_sector(void *context, unsigned char sector[512], unsigned int si
         return 0;
     const unsigned int lba = fat16_cluster_lba(vol, source->cluster) + source->sector++;
     return ata_read_sector(vol->disk, lba, sector);
+}
+
+enum fat16_edit_result fat16_sys64_install(const struct fat16_volume *vol, const struct fat16_file *file,
+    const unsigned char *name, unsigned int size, int replace)
+{
+    struct short_name alias;
+    if (file->is_directory || !file->size || !encode_name(&alias, name, size) ||
+        !equal_bytes(alias.alias + 8, (const unsigned char *)"APP", 3))
+        return FAT16_EDIT_NAME;
+    struct fat16_file folder;
+    const enum fat16_edit_result status = fat16_sys64_ensure(vol, &folder);
+    if (status != FAT16_EDIT_OK)
+        return status;
+    struct file_source source = { .volume = vol, .cluster = file->first_cluster };
+    return write_source(vol, folder.first_cluster, name, size, file->size, disk_sector, &source,
+        WRITE_SYS64 | (replace ? 0 : WRITE_EXCLUSIVE));
 }
 
 static unsigned int name_length(const unsigned char *name)
@@ -648,6 +782,11 @@ static enum fat16_edit_result transfer_file(const struct fat16_volume *vol,
     const unsigned int old_length = name_length(old_name), new_length = name_length(new_name);
     if (!encode_name(&old, old_name, old_length) || !encode_name(&next, new_name, new_length))
         return FAT16_EDIT_NAME;
+    enum fat16_edit_result access = mutation_allowed(vol, to, &next);
+    if (access == FAT16_EDIT_OK && move)
+        access = mutation_allowed(vol, from, &old);
+    if (access != FAT16_EDIT_OK)
+        return access;
     if (!(flags & WRITE_ORIGINAL_NAME) && uppercase_txt(&next))
         return FAT16_EDIT_TEXT_EXTENSION;
     struct edit_entry origin, destination;

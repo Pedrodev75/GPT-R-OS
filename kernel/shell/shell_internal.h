@@ -69,9 +69,18 @@ void shell_cp(unsigned int *row, const unsigned char *argument);
 void shell_mv(unsigned int *row, const unsigned char *argument);
 void shell_ls(unsigned int *row, const unsigned char *argument);
 void shell_run_app(unsigned int *row, const unsigned char *argument);
+void shell_run_native(unsigned int *row, const unsigned char *argument);
+void shell_sysinstall(unsigned int *row, const unsigned char *argument);
+enum { SYS64_APP_PATH = 21 };
+const char *shell_sys64_app(const struct fat16_volume *volume, const unsigned char *name,
+    struct fat16_file *file, unsigned int *directory, unsigned char path[SYS64_APP_PATH]);
+struct shell_app_command {
+    const unsigned char *argument;
+    int search_sys64;
+};
 int shell_run_escape(int quoted, unsigned char next);
 const char *shell_check_run_args(const unsigned char *argument);
-void shell_run_apps(unsigned int *row, const unsigned char *const *arguments,
+void shell_run_apps(unsigned int *row, const struct shell_app_command *commands,
     unsigned int count, struct shell_stream *stream);
 int shell_open_volume(unsigned int *row, struct ata_disk *disk, struct fat16_volume *volume);
 int shell_lookup_file(const struct fat16_volume *volume,

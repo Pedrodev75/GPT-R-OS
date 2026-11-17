@@ -78,6 +78,13 @@ enum fat16_edit_result fat16_write_new_stream_at(const struct fat16_volume *vol,
     fat16_sector_source source, void *context);
 enum fat16_edit_result fat16_check_write(const struct fat16_volume *vol, unsigned int directory,
     const unsigned char *name, unsigned int name_size);
+enum fat16_edit_result fat16_check_mutation(const struct fat16_volume *vol, unsigned int directory,
+    const unsigned char *name, unsigned int name_size);
+enum fat16_edit_result fat16_sys64_directory(const struct fat16_volume *vol, struct fat16_file *folder);
+enum fat16_edit_result fat16_sys64_ensure(const struct fat16_volume *vol, struct fat16_file *folder);
+/* Trusted caller validates the APP before explicitly installing it. */
+enum fat16_edit_result fat16_sys64_install(const struct fat16_volume *vol, const struct fat16_file *file,
+    const unsigned char *name, unsigned int size, int replace);
 enum fat16_edit_result fat16_mkdir(const struct fat16_volume *volume,
     unsigned int directory, const unsigned char *name, unsigned int name_size);
 enum fat16_edit_result fat16_create(const struct fat16_volume *volume,

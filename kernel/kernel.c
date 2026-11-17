@@ -100,7 +100,14 @@ static void log_storage(unsigned int *row)
         boot_log(row, BOOT_SKIP, "Volume FAT16");
     } else {
         boot_log(row, BOOT_OK, "ATA PIO - disco detectado");
-        boot_log(row, fat16_mount(&volume, &disk) ? BOOT_OK : BOOT_FAILED, "Volume FAT16");
+        const int mounted = fat16_mount(&volume, &disk);
+        boot_log(row, mounted ? BOOT_OK : BOOT_FAILED, "Volume FAT16");
+        if (mounted) {
+            struct fat16_file system;
+            const enum fat16_edit_result status = fat16_sys64_ensure(&volume, &system);
+            boot_log(row, status == FAT16_EDIT_OK ? BOOT_OK : BOOT_FAILED,
+                status == FAT16_EDIT_EXISTS ? "SYS64 - nome ocupado" : "Pasta /SYS64");
+        }
     }
 }
 

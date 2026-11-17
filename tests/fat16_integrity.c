@@ -109,6 +109,87 @@ static void check_app(const char *name, unsigned int version)
     CHECK(app_validate_header(header, size, file.size, &info) && info.version == version);
 }
 
+static void sys64_foundation(void)
+{
+    static const unsigned char folder_name[] = "SYS64", app_name[] = "TOOL.APP";
+    static const unsigned char sub_name[] = "SUB", notes[] = "note.txt";
+    struct fat16_file folder, app;
+    memset(medium, 0, sizeof(medium));
+    CHECK(fat16_sys64_directory(&volume, &folder) == FAT16_EDIT_MISSING);
+    CHECK(fat16_mkdir(&volume, 0, folder_name, 5) == FAT16_EDIT_PROTECTED);
+    fail_lba = ROOT;
+    fail = publish_before_failure = 1;
+    CHECK(fat16_sys64_ensure(&volume, &folder) == FAT16_EDIT_IO);
+    CHECK(fat16_sys64_directory(&volume, &folder) == FAT16_EDIT_MISSING);
+    CHECK(next_free(2) == 2);
+    check_mirrors();
+    CHECK(fat16_sys64_ensure(&volume, &folder) == FAT16_EDIT_OK);
+    const unsigned int system = folder.first_cluster;
+    const unsigned int revision = fat16_mutations();
+    CHECK(fat16_sys64_ensure(&volume, &folder) == FAT16_EDIT_OK);
+    CHECK(fat16_mutations() == revision && folder.first_cluster == system);
+
+    CHECK(put("SOURCE.APP", "contents") == FAT16_EDIT_OK);
+    app = find("SOURCE.APP");
+    CHECK(fat16_sys64_install(&volume, &app, app_name, 8, 0) == FAT16_EDIT_OK);
+    CHECK(fat16_sys64_install(&volume, &app, app_name, 8, 0) == FAT16_EDIT_EXISTS);
+    CHECK(fat16_check_write(&volume, system, app_name, 8) == FAT16_EDIT_PROTECTED);
+    CHECK(fat16_remove_at(&volume, system, app_name, 8) == FAT16_EDIT_PROTECTED);
+    CHECK(fat16_remove_at(&volume, 0, (const unsigned char *)"sys64", 5) == FAT16_EDIT_PROTECTED);
+    CHECK(fat16_mkdir(&volume, system, sub_name, 3) == FAT16_EDIT_PROTECTED);
+    CHECK(fat16_create(&volume, system, notes, 8) == FAT16_EDIT_PROTECTED);
+    CHECK(fat16_transfer(&volume, system, app_name, 0, app_name, 1) == FAT16_EDIT_PROTECTED);
+    CHECK(fat16_transfer(&volume, system, app_name, 0, app_name, 0) == FAT16_EDIT_OK);
+    CHECK(content_is("TOOL.APP", "contents"));
+    CHECK(fat16_restore_file(&volume, 0, app_name, system, app_name) == FAT16_EDIT_PROTECTED);
+    CHECK(fat16_transfer(&volume, 0, folder_name, 0, (const unsigned char *)"OLD", 1) == FAT16_EDIT_PROTECTED);
+    app_files_begin(0, &volume, 0);
+    CHECK(app_file_open(0, (const unsigned char *)"/SYS64/TOOL.APP", APP_FILE_WRITE_MODE) == APP_ERR_ACCESS);
+    struct asm_diagnostic diag;
+    CHECK(put("GOOD.ASM", "ret\n") == FAT16_EDIT_OK);
+    CHECK(app_file_assemble(0, (const unsigned char *)"GOOD.ASM", (const unsigned char *)"/SYS64/TOOL.APP",
+        APP_V11_VERSION, &diag) == APP_ERR_ACCESS);
+
+    CHECK(put("SOURCE.APP", "updated") == FAT16_EDIT_OK);
+    app = find("SOURCE.APP");
+    fail_lba = DATA + system - 2;
+    fail = publish_before_failure = 1;
+    CHECK(fat16_sys64_install(&volume, &app, app_name, 8, 1) == FAT16_EDIT_IO);
+    struct fat16_file target;
+    CHECK(fat16_lookup_at(&volume, system, app_name, &target) == 1 && target.size == 8);
+    CHECK(fat16_sys64_install(&volume, &app, app_name, 8, 1) == FAT16_EDIT_OK);
+    CHECK(fat16_lookup_at(&volume, system, app_name, &target) == 1 && target.size == 7);
+    CHECK(fat16_sys64_ensure(&volume, &folder) == FAT16_EDIT_OK && folder.first_cluster == system);
+    check_mirrors();
+
+    /* An existing volume may contain nested system folders provisioned offline. */
+    memset(medium, 0, sizeof(medium));
+    CHECK(fat16_mkdir(&volume, 0, (const unsigned char *)"STAGE", 5) == FAT16_EDIT_OK);
+    struct fat16_file stage;
+    CHECK(fat16_find_at(&volume, 0, (const unsigned char *)"STAGE", &stage) == 1);
+    CHECK(fat16_mkdir(&volume, stage.first_cluster, sub_name, 3) == FAT16_EDIT_OK);
+    CHECK(fat16_find_at(&volume, stage.first_cluster, sub_name, &folder) == 1);
+    CHECK(fat16_create(&volume, folder.first_cluster, notes, 8) == FAT16_EDIT_OK);
+    memcpy(medium[ROOT], "SYS64      ", 11);
+    medium[ROOT][12] = FAT16_LOWER_BASE;
+    CHECK(fat16_sys64_ensure(&volume, &stage) == FAT16_EDIT_OK && !strcmp(stage.name, "sys64"));
+    CHECK(fat16_remove_at(&volume, folder.first_cluster, notes, 8) == FAT16_EDIT_PROTECTED);
+    CHECK(fat16_check_write(&volume, folder.first_cluster, notes, 8) == FAT16_EDIT_PROTECTED);
+    CHECK(fat16_mkdir(&volume, 0, (const unsigned char *)"OTHER", 5) == FAT16_EDIT_OK);
+    struct fat16_file other;
+    CHECK(fat16_find_at(&volume, 0, (const unsigned char *)"OTHER", &other) == 1);
+    CHECK(fat16_create(&volume, other.first_cluster, notes, 8) == FAT16_EDIT_OK);
+    check_mirrors();
+
+    memset(medium, 0, sizeof(medium));
+    CHECK(put("STAGE", "keep me") == FAT16_EDIT_OK);
+    memcpy(medium[ROOT], "SYS64      ", 11);
+    CHECK(fat16_sys64_ensure(&volume, &folder) == FAT16_EDIT_EXISTS);
+    CHECK(content_is("SYS64", "keep me"));
+    CHECK(put("outside.txt", "safe") == FAT16_EDIT_OK && !outstanding);
+    puts("SYS64 creation, idempotence, nested protection and update rollback passed");
+}
+
 static int assemble(const char *source, const char *target, unsigned int version,
     struct asm_diagnostic *diag)
 {
@@ -315,6 +396,7 @@ int main(void)
     CHECK(app_file_close(0, reader, 1) == 0);
     CHECK(outstanding == 0);
     assembly_service();
+    sys64_foundation();
     puts("FAT16 and APP checks completed.");
     return 0;
 }

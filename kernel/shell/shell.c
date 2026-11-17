@@ -79,11 +79,14 @@ static void command_color(unsigned int *row, const unsigned char *argument)
 
 static const unsigned char *argument_for(const unsigned char *input, const char *name)
 {
-    while (*name && *input == (unsigned char)*name) {
+    while (*name) {
+        const unsigned char ch = *input >= 'A' && *input <= 'Z' ? *input + ('a' - 'A') : *input;
+        if (ch != (unsigned char)*name)
+            return 0;
         ++input;
         ++name;
     }
-    return !*name && (!*input || *input == ' ') ? input : 0;
+    return !*input || *input == ' ' ? input : 0;
 }
 
 
@@ -177,6 +180,7 @@ static const struct command {
     {"mv", "Move ou renomeia um arquivo", shell_mv, "<arquivo> <destino>", 0},
     {"cat", "Le texto com paginacao", shell_cat, "<arquivo>", COMMAND_OUTPUT | COMMAND_INPUT},
     {"run", "Executa um .APP com argumentos", shell_run_app, "<arquivo.APP> [argumentos]", COMMAND_OUTPUT | COMMAND_INPUT},
+    {"sysinstall", "Instala um APP no SYS64", shell_sysinstall, "[-u] <origem.APP> [NOME.APP]", 0},
     {"asm", "Monta um fonte para .APP", shell_assemble, "[-f v1.1] <fonte.asm> <saida.APP>", 0},
     {"appinfo", "Mostra o cabecalho de um .APP", shell_appinfo, "<arquivo.APP>", COMMAND_OUTPUT},
 #ifdef GPT_R_GRAPHICS
@@ -326,6 +330,34 @@ struct shell_stage {
     const unsigned char *argument;
 };
 
+static const struct command native_command = {
+    .run = shell_run_native, .streams = COMMAND_OUTPUT | COMMAND_INPUT
+};
+
+static const struct command *lookup_command(const unsigned char *start, const unsigned char **argument)
+{
+    for (unsigned int i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
+        const unsigned char *found = argument_for(start, commands[i].name);
+        if (found) {
+            *argument = found;
+            return &commands[i];
+        }
+    }
+    *argument = start;
+    return &native_command;
+}
+
+static int is_app_command(const struct command *command)
+{
+    return command == &native_command || command->run == shell_run_app;
+}
+
+static int stage_uses_app_args(const unsigned char *start)
+{
+    const unsigned char *argument;
+    return is_app_command(lookup_command(shell_skip_spaces(start), &argument));
+}
+
 static int parse_stage(unsigned int *row, unsigned char *text, struct shell_stage *stage)
 {
     const unsigned char *start = shell_skip_spaces(text);
@@ -339,22 +371,20 @@ static int parse_stage(unsigned int *row, unsigned char *text, struct shell_stag
         shell_print_error(row, "Falta um comando na linha");
         return 0;
     }
-    for (unsigned int i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
-        const unsigned char *argument = argument_for(start, commands[i].name);
-        if (argument && (commands[i].usage || !*argument)) {
-            if (commands[i].run == shell_run_app) {
-                const char *error = shell_check_run_args(argument);
-                if (error) {
-                    shell_print_error(row, error);
-                    return 0;
-                }
-            }
-            *stage = (struct shell_stage){&commands[i], argument};
-            return 1;
+    const unsigned char *argument;
+    const struct command *command = lookup_command(start, &argument);
+    if (is_app_command(command)) {
+        const char *error = shell_check_run_args(argument);
+        if (error) {
+            shell_print_error(row, error);
+            return 0;
         }
+    } else if (!command->usage && *argument) {
+        shell_print_error(row, "Comando interno nao aceita argumentos");
+        return 0;
     }
-    shell_print_error(row, "Comando desconhecido");
-    return 0;
+    *stage = (struct shell_stage){command, argument};
+    return 1;
 }
 
 static int redirect_sector(void *context, unsigned char sector[512], unsigned int size)
@@ -413,13 +443,13 @@ static void run_pipeline(unsigned int *row, const struct shell_stage *stages,
     struct shell_buffer *input = 0, *output = 0;
     int failed = 0;
     for (unsigned int i = 0; i < count;) {
-        const unsigned char *apps[APP_JOB_LIMIT];
+        struct shell_app_command apps[APP_JOB_LIMIT];
         unsigned int app_count = 0, next = i + 1;
-        if (stages[i].command->run == shell_run_app) {
-            apps[app_count++] = stages[i].argument;
+        if (is_app_command(stages[i].command)) {
+            apps[app_count++] = (struct shell_app_command){ stages[i].argument, stages[i].command == &native_command };
             for (; next < count; ++next) {
-                if (stages[next].command->run == shell_run_app) {
-                    apps[app_count++] = stages[next].argument;
+                if (is_app_command(stages[next].command)) {
+                    apps[app_count++] = (struct shell_app_command){ stages[next].argument, stages[next].command == &native_command };
                 } else if (stages[next].command->run != shell_cat ||
                     *shell_skip_spaces(stages[next].argument)) {
                     break;
@@ -481,7 +511,7 @@ static void execute(unsigned int *row, unsigned char *line, unsigned int length)
     struct shell_stage stages[PIPE_STAGES];
     unsigned int count = 0;
     unsigned char *part = line, *next = line, *redirect = 0;
-    int app_args = argument_for(line, "run") != 0, quoted = 0;
+    int app_args = stage_uses_app_args(line), quoted = 0;
     for (const unsigned char *p = line; *p; ++p) {
         if (*p == '\\' && (app_args ? shell_run_escape(quoted, p[1]) : p[1] == '|' || p[1] == '>')) {
             if (app_args)
@@ -504,7 +534,7 @@ static void execute(unsigned int *row, unsigned char *line, unsigned int length)
         if (!parse_stage(row, part, &stages[count++]))
             return;
         part = next;
-        app_args = op == '|' && argument_for(shell_skip_spaces(p + 1), "run") != 0;
+        app_args = op == '|' && stage_uses_app_args(p + 1);
         if (op == '>')
             redirect = part;
     }
